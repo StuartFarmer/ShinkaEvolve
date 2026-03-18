@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "shinka-evolve"
-dynamic = ["version"]
+version = "0.0.1"
 description = "Automated Scientific Evolution"
 authors = [
     {name = "Sakana AI", email = "robert@sakana.ai"}
 ]
 readme = "README.md"
 license = "Apache-2.0"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<4.0"
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
@@ -47,7 +47,8 @@ dependencies = [
     "aiofiles",
     "google-genai",
     "psutil",
-    "httpx==0.27"
+    "httpx==0.27",
+    "yfinance (>=1.2.0,<2.0.0)"
 ]
 
 [project.scripts]
@@ -57,9 +58,6 @@ shinka_visualize = "shinka.webui.visualization:main"
 
 [tool.setuptools]
 include-package-data = false
-
-[tool.setuptools.dynamic]
-version = {attr = "shinka.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -87,6 +85,9 @@ dev = [
     "isort",
     "flake8",
 ]
+
+[tool.poetry]
+packages = [{ include = "shinka" }]
 
 [tool.pytest.ini_options]
 addopts = "--strict-markers"

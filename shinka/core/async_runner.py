@@ -6,6 +6,7 @@ Provides fully asynchronous evolution pipeline with concurrent LLM sampling.
 import json
 import asyncio
 import logging
+import re
 import shutil
 import time
 import uuid
@@ -58,6 +59,14 @@ from shinka.utils import get_language_extension
 from shinka.utils.languages import get_evolve_comment_prefix
 
 logger = logging.getLogger(__name__)
+
+ISLAND_METADATA_FIELDS = (
+    "family_id",
+    "family_name",
+    "family_context",
+    "island_task_sys_msg",
+    "seed_label",
+)
 
 
 def _print_gradient_logo_and_mirror(log_path: Optional[Path] = None) -> None:
@@ -852,7 +861,13 @@ class ShinkaEvolveRunner:
             self.next_generation_to_submit = self.completed_generations
         else:
             # Generate or copy initial program only if NOT resuming
-            if (
+            if self.evo_config.island_seeds:
+                if self.verbose:
+                    logger.info(
+                        f"Setting up {len(self.evo_config.island_seeds)} explicit island seed programs"
+                    )
+                await self._setup_island_seed_programs()
+            elif (
                 self.evo_config.init_program_path
                 and Path(self.evo_config.init_program_path).exists()
             ):
@@ -1134,6 +1149,215 @@ class ShinkaEvolveRunner:
             code, "initial_program", "Initial program setup", 0.0
         )
 
+    @staticmethod
+    def _slugify_seed_label(value: str) -> str:
+        slug = re.sub(r"[^a-zA-Z0-9]+", "_", value).strip("_").lower()
+        return slug or "seed"
+
+    def _get_island_metadata(self, program: Optional[Program]) -> Dict[str, Any]:
+        if not program or not program.metadata:
+            return {}
+        return {
+            key: value
+            for key in ISLAND_METADATA_FIELDS
+            if (value := program.metadata.get(key)) not in (None, "")
+        }
+
+    def _compose_island_system_prompt(
+        self,
+        base_system_prompt: Optional[str],
+        program: Optional[Program],
+    ) -> Optional[str]:
+        metadata = self._get_island_metadata(program)
+        family_context = metadata.get("family_context")
+        family_name = metadata.get("family_name") or metadata.get("family_id")
+        prompt = metadata.get("island_task_sys_msg") or base_system_prompt
+
+        if not family_context:
+            return prompt
+
+        prompt_prefix = prompt.rstrip() if isinstance(prompt, str) else ""
+        family_header = "# Island Family Context"
+        family_lines = [family_header]
+        if family_name:
+            family_lines.append(f"Family: {family_name}")
+        family_lines.append(str(family_context).strip())
+        family_context_block = "\n".join(family_lines)
+
+        if prompt_prefix:
+            return f"{prompt_prefix}\n\n{family_context_block}"
+        return family_context_block
+
+    async def _update_initial_program_metadata_async(self, initial_program: Program):
+        """Persist metadata updates for a stored initial program."""
+
+        def update_metadata():
+            from shinka.database import ProgramDatabase
+
+            thread_db = ProgramDatabase(self.db.config)
+            try:
+                metadata_json = json.dumps(initial_program.metadata or {})
+                thread_db.cursor.execute(
+                    "UPDATE programs SET metadata = ? WHERE id = ?",
+                    (metadata_json, initial_program.id),
+                )
+                thread_db.conn.commit()
+            finally:
+                thread_db.close()
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, update_metadata)
+
+    async def _track_initial_program(self, initial_program: Program):
+        await self.async_db.add_program_async(initial_program)
+
+        initial_api_cost = (initial_program.metadata or {}).get("api_costs", 0.0)
+        initial_embed_cost = (initial_program.metadata or {}).get("embed_cost", 0.0)
+        initial_novelty_cost = (initial_program.metadata or {}).get("novelty_cost", 0.0)
+        self.total_api_cost += (
+            initial_api_cost + initial_embed_cost + initial_novelty_cost
+        )
+
+        if self.meta_summarizer:
+            self.meta_summarizer.add_evaluated_program(initial_program)
+
+            if self.meta_summarizer.should_update_meta(
+                self.evo_config.meta_rec_interval
+            ):
+                logger.info(
+                    f"Updating meta memory after processing "
+                    f"{len(self.meta_summarizer.evaluated_since_last_meta)} programs..."
+                )
+                best_program = await self.async_db.get_best_program_async()
+                (
+                    updated_recs,
+                    meta_cost,
+                ) = await self.meta_summarizer.update_meta_memory_async(best_program)
+                if updated_recs:
+                    await self.meta_summarizer.write_meta_output_async(
+                        str(self.results_dir)
+                    )
+                    if meta_cost > 0:
+                        logger.info(
+                            f"Meta recommendation generation cost: ${meta_cost:.4f}"
+                        )
+                        self.total_api_cost += meta_cost
+                        if initial_program.metadata is None:
+                            initial_program.metadata = {}
+                        initial_program.metadata["meta_cost"] = meta_cost
+                        await self._update_initial_program_metadata_async(
+                            initial_program
+                        )
+
+    async def _finalize_initial_programs(self, initial_programs: List[Program]):
+        for initial_program in initial_programs:
+            await self._track_initial_program(initial_program)
+
+        if self.llm_selection is not None:
+            baseline_score = max(
+                (
+                    program.combined_score
+                    for program in initial_programs
+                    if program.correct
+                ),
+                default=0.0,
+            )
+            self.llm_selection.set_baseline_score(baseline_score)
+
+        if self.db:
+            self.db.set_initial_program_count_adjustment(len(initial_programs) - 1)
+
+        self.completed_generations = 1
+        self._record_progress()
+
+        if self.verbose:
+            for initial_program in initial_programs:
+                logger.info(
+                    f"Setup initial program: {initial_program.id} "
+                    f"(island {initial_program.island_idx})"
+                )
+            logger.info("Generation 0 completed during setup")
+
+    async def _setup_island_seed_programs(self):
+        island_seeds = self.evo_config.island_seeds or []
+        if not island_seeds:
+            raise ValueError("evo.island_seeds was provided but no seeds were defined")
+
+        num_islands = getattr(self.db_config, "num_islands", 0)
+        if num_islands <= 0:
+            raise ValueError(
+                "Explicit island seeds require db.num_islands to be greater than 0"
+            )
+
+        assigned_islands = set()
+        initial_programs = []
+
+        for default_island_idx, seed in enumerate(island_seeds):
+            if not isinstance(seed, dict):
+                raise ValueError("Each evo.island_seeds entry must be a dictionary")
+
+            init_program_path = seed.get("init_program_path")
+            if not init_program_path:
+                raise ValueError(
+                    "Each evo.island_seeds entry must define init_program_path"
+                )
+
+            seed_path = Path(init_program_path).expanduser()
+            if not seed_path.is_absolute():
+                seed_path = Path.cwd() / seed_path
+            if not seed_path.exists():
+                raise FileNotFoundError(
+                    f"Island seed program does not exist: {seed_path}"
+                )
+
+            island_idx = int(seed.get("island_idx", default_island_idx))
+            if island_idx < 0 or island_idx >= num_islands:
+                raise ValueError(
+                    f"Island seed index {island_idx} is out of range for "
+                    f"db.num_islands={num_islands}"
+                )
+            if island_idx in assigned_islands:
+                raise ValueError(
+                    f"Duplicate island seed assignment for island {island_idx}"
+                )
+            assigned_islands.add(island_idx)
+
+            family_id = str(seed.get("family_id") or f"family_{island_idx}")
+            family_name = str(seed.get("family_name") or family_id)
+            artifact_stem = (
+                f"island_{island_idx}_{self._slugify_seed_label(family_id)}"
+            )
+            patch_name = str(seed.get("seed_label") or f"{family_id}_seed")
+
+            extra_metadata = {
+                "seed_origin": "configured_island_seed",
+                "family_id": family_id,
+                "family_name": family_name,
+                "seed_label": patch_name,
+            }
+            if seed.get("context"):
+                extra_metadata["family_context"] = seed["context"]
+            if seed.get("task_sys_msg"):
+                extra_metadata["island_task_sys_msg"] = seed["task_sys_msg"]
+
+            initial_code = await self._read_file_async(str(seed_path))
+            if initial_code is None:
+                raise ValueError(f"Failed to read island seed program: {seed_path}")
+
+            initial_program = await self._create_initial_program(
+                code=initial_code,
+                patch_name=patch_name,
+                patch_description=f"Configured island seed for {family_name}",
+                api_cost=0.0,
+                llm_metadata=None,
+                extra_metadata=extra_metadata,
+                artifact_stem=artifact_stem,
+                forced_island_idx=island_idx,
+            )
+            initial_programs.append(initial_program)
+
+        await self._finalize_initial_programs(initial_programs)
+
     async def _setup_initial_program_with_metadata(
         self,
         code: str,
@@ -1143,38 +1367,56 @@ class ShinkaEvolveRunner:
         llm_metadata: Optional[Dict[str, Any]] = None,
     ):
         """Setup initial program in database with metadata."""
-        # Create generation 0 directory structure first
-        gen_dir = f"{self.results_dir}/{FOLDER_PREFIX}_0"
-        results_dir = f"{gen_dir}/results"
+        initial_program = await self._create_initial_program(
+            code=code,
+            patch_name=patch_name,
+            patch_description=patch_description,
+            api_cost=api_cost,
+            llm_metadata=llm_metadata,
+        )
+        await self._finalize_initial_programs([initial_program])
 
-        # Create directories synchronously to avoid race conditions
-        Path(gen_dir).mkdir(parents=True, exist_ok=True)
-        Path(results_dir).mkdir(parents=True, exist_ok=True)
+    async def _create_initial_program(
+        self,
+        code: str,
+        patch_name: Optional[str],
+        patch_description: Optional[str],
+        api_cost: float,
+        llm_metadata: Optional[Dict[str, Any]] = None,
+        extra_metadata: Optional[Dict[str, Any]] = None,
+        artifact_stem: str = "main",
+        forced_island_idx: Optional[int] = None,
+    ) -> Program:
+        """Evaluate and build an initial program record before DB insertion."""
+        gen_dir = Path(self.results_dir) / f"{FOLDER_PREFIX}_0"
+        results_root = gen_dir / "results"
+        gen_dir.mkdir(parents=True, exist_ok=True)
+        results_root.mkdir(parents=True, exist_ok=True)
 
-        # Write the initial program file
-        exec_fname = f"{gen_dir}/main.{self.lang_ext}"
-        await write_file_async(exec_fname, code)
+        exec_path = gen_dir / f"{artifact_stem}.{self.lang_ext}"
+        seed_results_dir = (
+            results_root if artifact_stem == "main" else results_root / artifact_stem
+        )
+        seed_results_dir.mkdir(parents=True, exist_ok=True)
 
-        # Run initial evaluation to get proper metrics
+        await write_file_async(str(exec_path), code)
+
         try:
             if self.verbose:
-                logger.info(f"Starting initial program evaluation: {exec_fname}")
+                logger.info(f"Starting initial program evaluation: {exec_path}")
 
-            # Run the evaluation synchronously for generation 0
             loop = asyncio.get_event_loop()
             results, rtime = await loop.run_in_executor(
-                None, self.scheduler.run, exec_fname, results_dir
+                None, self.scheduler.run, str(exec_path), str(seed_results_dir)
             )
 
             if self.verbose:
                 logger.info(f"Initial program evaluation completed in {rtime:.2f}s")
 
-            # Get code embedding for initial program
-            code_embedding, e_cost = await self._get_code_embedding_async(exec_fname)
+            code_embedding, e_cost = await self._get_code_embedding_async(str(exec_path))
             if self.verbose and code_embedding:
                 logger.info(f"Initial program embedding computed (cost: ${e_cost:.4f})")
 
-            # Extract metrics properly like the sync version
             correct_val = results.get("correct", {}).get("correct", False)
             metrics_val = results.get("metrics", {})
             combined_score = metrics_val.get("combined_score", 0.0)
@@ -1184,16 +1426,13 @@ class ShinkaEvolveRunner:
             stdout_log = results.get("stdout_log", "")
             stderr_log = results.get("stderr_log", "")
 
-            # Build base metadata
             base_metadata = {
                 "compute_time": rtime,
                 "embed_cost": e_cost,
-                "novelty_cost": 0.0,  # No novelty cost for generation 0
+                "novelty_cost": 0.0,
                 "stdout_log": stdout_log,
                 "stderr_log": stderr_log,
             }
-
-            # For file-based initial programs, add default metadata
             if not llm_metadata:
                 base_metadata.update(
                     {
@@ -1205,10 +1444,10 @@ class ShinkaEvolveRunner:
                     }
                 )
             else:
-                # LLM-generated: llm_metadata already contains structured data
                 base_metadata.update(llm_metadata)
+            if extra_metadata:
+                base_metadata.update(extra_metadata)
 
-            # Create program with actual evaluation results
             initial_program = Program(
                 id=str(uuid.uuid4()),
                 code=code,
@@ -1220,37 +1459,35 @@ class ShinkaEvolveRunner:
                 text_feedback=text_feedback,
                 timestamp=datetime.now().timestamp(),
                 embedding=code_embedding,
+                island_idx=forced_island_idx,
                 metadata=base_metadata,
             )
 
             if self.verbose:
                 logger.info(
                     f"Initial program evaluated - correct: {initial_program.correct}, "
-                    f"combined_score: {initial_program.combined_score}"
+                    f"combined_score: {initial_program.combined_score}, "
+                    f"island: {initial_program.island_idx}"
                 )
 
         except Exception as e:
             logger.warning(f"Initial program evaluation failed: {e}")
 
-            # Still try to compute embedding even if evaluation failed
             try:
                 code_embedding, e_cost = await self._get_code_embedding_async(
-                    exec_fname
+                    str(exec_path)
                 )
             except Exception:
                 code_embedding, e_cost = None, 0.0
 
-            # Build base metadata for fallback
             base_metadata = {
                 "compute_time": 0.0,
                 "embed_cost": e_cost,
-                "novelty_cost": 0.0,  # No novelty cost for generation 0 fallback
+                "novelty_cost": 0.0,
                 "evaluation_failed": True,
                 "stdout_log": "",
                 "stderr_log": "",
             }
-
-            # For file-based initial programs, add default metadata
             if not llm_metadata:
                 base_metadata.update(
                     {
@@ -1262,10 +1499,10 @@ class ShinkaEvolveRunner:
                     }
                 )
             else:
-                # LLM-generated: llm_metadata already contains structured data
                 base_metadata.update(llm_metadata)
+            if extra_metadata:
+                base_metadata.update(extra_metadata)
 
-            # Fall back to assuming it's correct
             initial_program = Program(
                 id=str(uuid.uuid4()),
                 code=code,
@@ -1274,90 +1511,11 @@ class ShinkaEvolveRunner:
                 correct=True,
                 timestamp=datetime.now().timestamp(),
                 embedding=code_embedding,
+                island_idx=forced_island_idx,
                 metadata=base_metadata,
             )
 
-        # Add to database
-        await self.async_db.add_program_async(initial_program)
-
-        # Add initial program costs to in-memory total for accurate budget tracking
-        initial_api_cost = (initial_program.metadata or {}).get("api_costs", 0.0)
-        initial_embed_cost = (initial_program.metadata or {}).get("embed_cost", 0.0)
-        initial_novelty_cost = (initial_program.metadata or {}).get("novelty_cost", 0.0)
-        self.total_api_cost += (
-            initial_api_cost + initial_embed_cost + initial_novelty_cost
-        )
-
-        # Add the initial program to meta memory tracking
-        if self.meta_summarizer:
-            self.meta_summarizer.add_evaluated_program(initial_program)
-
-            # Check if we should update meta memory after adding this program
-            if self.meta_summarizer.should_update_meta(
-                self.evo_config.meta_rec_interval
-            ):
-                logger.info(
-                    f"Updating meta memory after processing "
-                    f"{len(self.meta_summarizer.evaluated_since_last_meta)} programs..."
-                )
-                best_program = await self.async_db.get_best_program_async()
-                # Use async meta summarizer for non-blocking meta analysis
-                (
-                    updated_recs,
-                    meta_cost,
-                ) = await self.meta_summarizer.update_meta_memory_async(best_program)
-                if updated_recs:
-                    # Write meta output file asynchronously
-                    await self.meta_summarizer.write_meta_output_async(
-                        str(self.results_dir)
-                    )
-                    # Store meta cost for tracking
-                    if meta_cost > 0:
-                        logger.info(
-                            f"Meta recommendation generation cost: ${meta_cost:.4f}"
-                        )
-                        # Add meta cost to in-memory total for accurate budget tracking
-                        self.total_api_cost += meta_cost
-
-                        # Add meta cost to this program's metadata (the one that triggered the update)
-                        if initial_program.metadata is None:
-                            initial_program.metadata = {}
-                        initial_program.metadata["meta_cost"] = meta_cost
-                        # Update the program in the database with the new metadata (thread-safe)
-
-                        def update_metadata():
-                            # Create a new database connection in this thread to avoid conflicts
-                            from shinka.database import ProgramDatabase
-
-                            thread_db = ProgramDatabase(self.db.config)
-                            try:
-                                metadata_json = json.dumps(initial_program.metadata)
-                                thread_db.cursor.execute(
-                                    "UPDATE programs SET metadata = ? WHERE id = ?",
-                                    (metadata_json, initial_program.id),
-                                )
-                                thread_db.conn.commit()
-                            finally:
-                                thread_db.close()
-
-                        loop = asyncio.get_event_loop()
-                        await loop.run_in_executor(None, update_metadata)
-
-        # Set baseline score for LLM selection
-        if self.llm_selection is not None:
-            self.llm_selection.set_baseline_score(
-                initial_program.combined_score if initial_program.correct else 0.0,
-            )
-
-        # Mark generation 0 as completed
-        self.completed_generations = 1
-
-        # Record progress after initial setup
-        self._record_progress()
-
-        if self.verbose:
-            logger.info(f"Setup initial program: {initial_program.id}")
-            logger.info("Generation 0 completed during setup")
+        return initial_program
 
     async def _verify_database_ready(self):
         """Verify that the database is ready for sampling with programs."""
@@ -2321,6 +2479,14 @@ class ShinkaEvolveRunner:
                 break
 
         # Add meta-recommendations/summary/scratchpad to meta_patch_data (same as sync runner)
+        inherited_island_metadata = (
+            self._get_island_metadata(parent_program)
+            if "parent_program" in locals()
+            else {}
+        )
+        if inherited_island_metadata:
+            meta_patch_data.update(inherited_island_metadata)
+
         if meta_recs is not None:
             meta_patch_data["meta_recommendations"] = meta_recs
             meta_patch_data["meta_summary"] = meta_summary
@@ -2514,7 +2680,17 @@ class ShinkaEvolveRunner:
             model_sample_probs: Model sampling probabilities
             model_posterior: Model posterior probabilities
         """
+        current_prompt_id: Optional[str] = None
+        original_task_sys_msg = self.prompt_sampler.task_sys_msg
+
         try:
+            current_sys_prompt, current_prompt_id = self._get_current_system_prompt()
+            composed_sys_prompt = self._compose_island_system_prompt(
+                current_sys_prompt, incorrect_program
+            )
+            if composed_sys_prompt:
+                self.prompt_sampler.task_sys_msg = composed_sys_prompt
+
             # Generate fix prompt with ancestor inspirations
             patch_sys, patch_msg, patch_type = self.prompt_sampler.sample_fix(
                 incorrect_program=incorrect_program,
@@ -2634,6 +2810,7 @@ class ShinkaEvolveRunner:
                         "novelty_attempt": novelty_attempt,
                         "resample_attempt": resample_attempt,
                         "patch_attempt": patch_attempt + 1,
+                        "system_prompt_id": current_prompt_id,
                         **llm_kwargs,  # Spread llm_kwargs like _run_patch_async
                         "llm_result": response.to_dict() if response else None,
                     }
@@ -2692,6 +2869,7 @@ class ShinkaEvolveRunner:
                 "novelty_attempt": novelty_attempt,
                 "resample_attempt": resample_attempt,
                 "patch_attempt": self.evo_config.max_patch_attempts,
+                "system_prompt_id": current_prompt_id,
                 **llm_kwargs,  # Spread llm_kwargs like _run_patch_async
                 "llm_result": response.to_dict() if response else None,
             }
@@ -2700,7 +2878,17 @@ class ShinkaEvolveRunner:
 
         except Exception as e:
             logger.error(f"Error in fix patch async: {e}")
-            return None, {"api_costs": 0.0, "error_attempt": str(e)}, False
+            return (
+                None,
+                {
+                    "api_costs": 0.0,
+                    "error_attempt": str(e),
+                    "system_prompt_id": current_prompt_id,
+                },
+                False,
+            )
+        finally:
+            self.prompt_sampler.task_sys_msg = original_task_sys_msg
 
     async def _run_patch_async(
         self,
@@ -2722,10 +2910,13 @@ class ShinkaEvolveRunner:
         try:
             # Get system prompt (potentially evolved)
             current_sys_prompt, current_prompt_id = self._get_current_system_prompt()
+            composed_sys_prompt = self._compose_island_system_prompt(
+                current_sys_prompt, parent_program
+            )
 
             # Temporarily update prompt_sampler with evolved prompt
-            if current_sys_prompt:
-                self.prompt_sampler.task_sys_msg = current_sys_prompt
+            if composed_sys_prompt:
+                self.prompt_sampler.task_sys_msg = composed_sys_prompt
 
             # Generate patch prompt
             patch_sys, patch_msg, patch_type = self.prompt_sampler.sample(
@@ -2734,9 +2925,6 @@ class ShinkaEvolveRunner:
                 top_k_inspirations=top_k_programs,
                 meta_recommendations=meta_recs,
             )
-
-            # Restore original task_sys_msg
-            self.prompt_sampler.task_sys_msg = original_task_sys_msg
 
             # Convert numpy string to regular Python string
             patch_type = str(patch_type)
@@ -2929,8 +3117,6 @@ class ShinkaEvolveRunner:
 
         except Exception as e:
             logger.error(f"Error in async patch generation: {e}")
-            # Restore original task_sys_msg in case of exception
-            self.prompt_sampler.task_sys_msg = original_task_sys_msg
             return (
                 None,
                 {
@@ -2940,6 +3126,8 @@ class ShinkaEvolveRunner:
                 },
                 False,
             )
+        finally:
+            self.prompt_sampler.task_sys_msg = original_task_sys_msg
 
     async def _get_code_embedding_async(
         self, exec_fname: str
@@ -3364,13 +3552,11 @@ class ShinkaEvolveRunner:
             # Get total number of programs in database (much faster single query)
             total_programs = await self.async_db.get_total_program_count_async()
 
-            # Account for island copies: the initial program gets duplicated
-            # (num_islands - 1) times, so we need to subtract these extra copies
-            num_islands = getattr(self.db_config, "num_islands", 1)
-            if num_islands > 1:
-                # Subtract the extra island copies of generation 0
-                island_copies = num_islands - 1
-                total_programs -= island_copies
+            initial_program_adjustment = getattr(
+                self.db, "initial_program_count_adjustment", 0
+            )
+            if initial_program_adjustment > 0:
+                total_programs -= initial_program_adjustment
 
             # Each generation should have exactly 1 program when completed
             # So completed generations = total programs - programs from running jobs

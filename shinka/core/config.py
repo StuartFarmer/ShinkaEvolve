@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from shinka.llm import BanditBase
 from shinka.defaults import (
@@ -19,6 +19,7 @@ FOLDER_PREFIX = "gen"
 @dataclass
 class EvolutionConfig:
     task_sys_msg: Optional[str] = DEFAULT_TASK_SYS_MSG
+    island_seeds: Optional[List[Dict[str, Any]]] = None
     patch_types: List[str] = field(default_factory=default_patch_types)
     patch_type_probs: List[float] = field(default_factory=default_patch_type_probs)
     num_generations: int = 50

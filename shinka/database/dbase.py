@@ -290,6 +290,7 @@ class ProgramDatabase:
         self.last_iteration: int = 0
         self.best_program_id: Optional[str] = None
         self.beam_search_parent_id: Optional[str] = None
+        self.initial_program_count_adjustment: int = 0
         # For deferring expensive operations
         self._schedule_migration: bool = False
 
@@ -584,6 +585,25 @@ class ProgramDatabase:
             float(row["value"]) if row and row["value"] is not None else None
         )
 
+        self.cursor.execute(
+            "SELECT value FROM metadata_store WHERE key = 'initial_program_count_adjustment'"
+        )
+        row = self.cursor.fetchone()
+        if row and row["value"] is not None:
+            self.initial_program_count_adjustment = int(row["value"])
+        else:
+            self.cursor.execute(
+                """SELECT COUNT(*) FROM programs
+                   WHERE generation = 0 AND parent_id IS NULL"""
+            )
+            initial_root_count = (self.cursor.fetchone() or [0])[0]
+            self.initial_program_count_adjustment = max(initial_root_count - 1, 0)
+            if not self.read_only:
+                self._update_metadata_in_db(
+                    "initial_program_count_adjustment",
+                    str(self.initial_program_count_adjustment),
+                )
+
     @db_retry()
     def _update_metadata_in_db(self, key: str, value: Optional[str]):
         if not self.cursor or not self.conn:
@@ -600,6 +620,16 @@ class ProgramDatabase:
             return 0
         self.cursor.execute("SELECT COUNT(*) FROM programs")
         return (self.cursor.fetchone() or {"COUNT(*)": 0})["COUNT(*)"]
+
+    @db_retry()
+    def set_initial_program_count_adjustment(self, adjustment: int):
+        if self.read_only:
+            raise PermissionError("Cannot update metadata in read-only mode.")
+        self.initial_program_count_adjustment = max(int(adjustment), 0)
+        self._update_metadata_in_db(
+            "initial_program_count_adjustment",
+            str(self.initial_program_count_adjustment),
+        )
 
     @db_retry()
     def add(self, program: Program, verbose: bool = False) -> str:

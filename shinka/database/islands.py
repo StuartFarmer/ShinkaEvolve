@@ -70,6 +70,13 @@ class DefaultIslandAssignmentStrategy(IslandStrategy):
         - Initial correct programs are distributed one per island.
         - Other initial programs are placed randomly, preferring empty islands.
         """
+        if program.island_idx is not None:
+            logger.debug(
+                f"Preserving explicitly assigned island {program.island_idx} "
+                f"for program {program.id}"
+            )
+            return
+
         num_islands = getattr(self.config, "num_islands", 0)
         if num_islands <= 0:
             program.island_idx = 0
@@ -133,6 +140,13 @@ class CopyInitialProgramIslandStrategy(IslandStrategy):
           are created for all other islands.
         - Other programs follow normal assignment rules.
         """
+        if program.island_idx is not None:
+            logger.debug(
+                f"Preserving explicitly assigned island {program.island_idx} "
+                f"for program {program.id}"
+            )
+            return
+
         num_islands = getattr(self.config, "num_islands", 0)
         if num_islands <= 0:
             program.island_idx = 0

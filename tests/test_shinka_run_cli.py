@@ -152,6 +152,36 @@ def test_shinka_run_parses_json_overrides(tmp_path, monkeypatch):
     assert job_config.extra_cmd_args == {"seed": 42}
 
 
+def test_shinka_run_parses_island_seed_overrides(tmp_path, monkeypatch):
+    _reset_dummy_runner()
+    task_dir = _make_task_dir(tmp_path)
+    results_dir = tmp_path / "results_island_seeds"
+    monkeypatch.setattr(cli_run, "ShinkaEvolveRunner", _DummyRunner)
+
+    cli_run.main(
+        [
+            "--task-dir",
+            str(task_dir),
+            "--results_dir",
+            str(results_dir),
+            "--num_generations",
+            "3",
+            "--set",
+            'evo.island_seeds=[{"family_id":"linear_rls","context":"Linear online regression family","init_program_path":"seed_linear.py","task_sys_msg":"Focus on stable linear online trading."}]',
+        ]
+    )
+
+    evo_config = _DummyRunner.last_kwargs["evo_config"]
+    assert evo_config.island_seeds == [
+        {
+            "family_id": "linear_rls",
+            "context": "Linear online regression family",
+            "init_program_path": "seed_linear.py",
+            "task_sys_msg": "Focus on stable linear online trading.",
+        }
+    ]
+
+
 def test_shinka_run_parses_activate_script_override(tmp_path, monkeypatch):
     _reset_dummy_runner()
     task_dir = _make_task_dir(tmp_path)

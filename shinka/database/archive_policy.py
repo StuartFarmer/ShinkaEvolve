@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import random
+import warnings
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
@@ -23,8 +24,23 @@ logger = logging.getLogger(__name__)
 class ArchivePolicy(ABC):
     """Pure archive selection policy over already-persisted programs."""
 
-    def __init__(self, config: DatabaseConfig):
-        self.config = config
+    def __init__(
+        self,
+        archive_size: int | DatabaseConfig,
+        archive_criteria: Optional[Dict[str, float]] = None,
+    ):
+        if isinstance(archive_size, DatabaseConfig):
+            warnings.warn(
+                "Passing DatabaseConfig into ArchivePolicy() is deprecated; "
+                "pass archive_size/archive_criteria explicitly.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            config = archive_size
+            archive_size = config.archive_size
+            archive_criteria = config.archive_criteria
+        self.archive_size = archive_size
+        self.archive_criteria = archive_criteria or {"combined_score": 1.0}
 
     @abstractmethod
     def compute(self, programs: List[Program]) -> List[Program]:
@@ -89,11 +105,7 @@ class ArchivePolicy(ABC):
     def _compute_archive_score_ranked(
         self, program: Program, archive_programs: List[Program]
     ) -> float:
-        criteria: Dict[str, float] = getattr(
-            self.config,
-            "archive_criteria",
-            {"combined_score": 1.0},
-        )
+        criteria: Dict[str, float] = self.archive_criteria
 
         if not archive_programs:
             primary_criterion = next(iter(criteria.keys()), "combined_score")
@@ -129,7 +141,7 @@ class ArchivePolicy(ABC):
         if program2.correct and not program1.correct:
             return False
 
-        criteria = getattr(self.config, "archive_criteria", {"combined_score": 1.0})
+        criteria = self.archive_criteria
         use_ranked = archive_programs is not None and len(criteria) > 1
 
         if use_ranked:
@@ -164,16 +176,16 @@ class FitnessArchivePolicy(ArchivePolicy):
     """Archive policy that retains the best programs under the configured criteria."""
 
     def compute(self, programs: List[Program]) -> List[Program]:
-        if self.config.archive_size <= 0:
+        if self.archive_size <= 0:
             return []
 
         archive: List[Program] = []
         for program in self._prepare_programs(programs):
-            if len(archive) < self.config.archive_size:
+            if len(archive) < self.archive_size:
                 archive.append(program)
                 continue
 
-            criteria = getattr(self.config, "archive_criteria", {"combined_score": 1.0})
+            criteria = self.archive_criteria
             if len(criteria) > 1:
                 worst = min(
                     archive,
@@ -195,13 +207,16 @@ class CrowdingArchivePolicy(ArchivePolicy):
     """Archive policy that preserves diversity by replacing local neighbors."""
 
     def compute(self, programs: List[Program]) -> List[Program]:
-        if self.config.archive_size <= 0:
+        if self.archive_size <= 0:
             return []
 
         archive: List[Program] = []
-        fitness_fallback = FitnessArchivePolicy(self.config)
+        fitness_fallback = FitnessArchivePolicy(
+            archive_size=self.archive_size,
+            archive_criteria=self.archive_criteria,
+        )
         for program in self._prepare_programs(programs):
-            if len(archive) < self.config.archive_size:
+            if len(archive) < self.archive_size:
                 archive.append(program)
                 continue
 
@@ -250,9 +265,33 @@ class CrowdingArchivePolicy(ArchivePolicy):
         return most_similar
 
 
-def create_archive_policy(config: DatabaseConfig) -> ArchivePolicy:
+def create_archive_policy(
+    config: Optional[DatabaseConfig] = None,
+    *,
+    archive_selection_strategy: str = "fitness",
+    archive_size: int = 40,
+    archive_criteria: Optional[Dict[str, float]] = None,
+) -> ArchivePolicy:
     """Factory for the configured computed archive policy."""
-    strategy = getattr(config, "archive_selection_strategy", "fitness")
+    if config is not None:
+        warnings.warn(
+            "Passing DatabaseConfig into create_archive_policy() is deprecated; "
+            "pass archive settings explicitly.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        archive_selection_strategy = config.archive_selection_strategy
+        archive_size = config.archive_size
+        archive_criteria = config.archive_criteria
+
+    criteria = archive_criteria or {"combined_score": 1.0}
+    strategy = archive_selection_strategy
     if strategy == "crowding":
-        return CrowdingArchivePolicy(config)
-    return FitnessArchivePolicy(config)
+        return CrowdingArchivePolicy(
+            archive_size=archive_size,
+            archive_criteria=criteria,
+        )
+    return FitnessArchivePolicy(
+        archive_size=archive_size,
+        archive_criteria=criteria,
+    )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -28,7 +29,8 @@ class RepositoryBundle:
     lives inside `ProgramDatabase.__init__`.
     """
 
-    config: DatabaseConfig
+    db_path: str | None
+    num_islands: int
     read_only: bool
     conn: sqlite3.Connection
     cursor: sqlite3.Cursor
@@ -37,24 +39,38 @@ class RepositoryBundle:
     @classmethod
     def open(
         cls,
-        config: "DatabaseConfig",
+        config: "DatabaseConfig" | None = None,
         *,
+        db_path: str | None = None,
+        num_islands: int = 2,
         read_only: bool = False,
     ) -> "RepositoryBundle":
         from .repository import ProgramRepository
 
-        conn = cls._connect(config=config, read_only=read_only)
+        if config is not None:
+            warnings.warn(
+                "Passing DatabaseConfig into RepositoryBundle.open() is deprecated; "
+                "pass db_path/num_islands explicitly.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            db_path = config.db_path
+            num_islands = config.num_islands
+
+        conn = cls._connect(db_path=db_path, read_only=read_only)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         programs = ProgramRepository.from_existing_connection(
-            config=config,
+            db_path=db_path,
+            num_islands=num_islands,
             conn=conn,
             cursor=cursor,
             read_only=read_only,
             ensure_schema=not read_only,
         )
         return cls(
-            config=config,
+            db_path=db_path,
+            num_islands=num_islands,
             read_only=read_only,
             conn=conn,
             cursor=cursor,
@@ -64,13 +80,11 @@ class RepositoryBundle:
     @staticmethod
     def _connect(
         *,
-        config: "DatabaseConfig",
+        db_path: str | None,
         read_only: bool,
     ) -> sqlite3.Connection:
-        db_path_str = config.db_path
-
-        if db_path_str:
-            db_file = Path(db_path_str).resolve()
+        if db_path:
+            db_file = Path(db_path).resolve()
             if not read_only:
                 db_wal_file = Path(f"{db_file}-wal")
                 db_shm_file = Path(f"{db_file}-shm")
@@ -103,7 +117,7 @@ class RepositoryBundle:
             return conn
 
         if read_only:
-            raise ValueError("Read-only bundle requires config.db_path")
+            raise ValueError("Read-only bundle requires db_path")
         logger.info("Initialized in-memory SQLite database.")
         return sqlite3.connect(":memory:")
 

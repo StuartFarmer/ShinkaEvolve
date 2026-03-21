@@ -128,6 +128,14 @@ class DatabaseConfig:
     # Weights represent relative importance after rank normalization
     archive_criteria: Dict[str, float] = field(default_factory=default_archive_criteria)
 
+    def __post_init__(self) -> None:
+        warnings.warn(
+            "DatabaseConfig is deprecated as a constructor surface for runtime/storage "
+            "classes. Pass explicit init args instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
 
 def db_retry(max_retries=5, initial_delay=0.1, backoff_factor=2):
     """
@@ -299,11 +307,85 @@ class ProgramDatabase:
 
     def __init__(
         self,
-        config: DatabaseConfig,
+        config: Optional[DatabaseConfig] = None,
+        *,
+        db_path: Optional[str] = None,
+        num_islands: int = 2,
+        archive_size: int = 40,
+        migration_interval: int = 10,
+        migration_rate: float = 0.0,
+        island_elitism: bool = True,
+        island_selection_strategy: str = "uniform",
+        enable_dynamic_islands: bool = False,
+        stagnation_threshold: int = 100,
+        island_spawn_strategy: str = "initial",
+        island_spawn_subtree_size: int = 1,
+        parent_selection_strategy: str = "weighted",
+        exploitation_alpha: float = 1.0,
+        exploitation_ratio: float = 0.2,
+        parent_selection_lambda: float = 10.0,
+        num_beams: int = 5,
+        archive_selection_strategy: str = "fitness",
+        archive_criteria: Optional[Dict[str, float]] = None,
+        elite_selection_ratio: float = 0.3,
+        num_archive_inspirations: int = 1,
+        num_top_k_inspirations: int = 1,
+        enforce_island_separation: bool = True,
         embedding_model: str = "text-embedding-3-small",
         read_only: bool = False,
     ):
-        self.config = config
+        if config is not None:
+            warnings.warn(
+                "Passing DatabaseConfig into ProgramDatabase() is deprecated; "
+                "pass explicit init args instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            db_path = config.db_path
+            num_islands = config.num_islands
+            archive_size = config.archive_size
+            migration_interval = config.migration_interval
+            migration_rate = config.migration_rate
+            island_elitism = config.island_elitism
+            island_selection_strategy = config.island_selection_strategy
+            enable_dynamic_islands = config.enable_dynamic_islands
+            stagnation_threshold = config.stagnation_threshold
+            island_spawn_strategy = config.island_spawn_strategy
+            island_spawn_subtree_size = config.island_spawn_subtree_size
+            parent_selection_strategy = config.parent_selection_strategy
+            exploitation_alpha = config.exploitation_alpha
+            exploitation_ratio = config.exploitation_ratio
+            parent_selection_lambda = config.parent_selection_lambda
+            num_beams = config.num_beams
+            archive_selection_strategy = config.archive_selection_strategy
+            archive_criteria = config.archive_criteria
+            elite_selection_ratio = config.elite_selection_ratio
+            num_archive_inspirations = config.num_archive_inspirations
+            num_top_k_inspirations = config.num_top_k_inspirations
+            enforce_island_separation = config.enforce_island_separation
+
+        self.db_path = db_path
+        self.num_islands = num_islands
+        self.archive_size = archive_size
+        self.migration_interval = migration_interval
+        self.migration_rate = migration_rate
+        self.island_elitism = island_elitism
+        self.island_selection_strategy = island_selection_strategy
+        self.enable_dynamic_islands = enable_dynamic_islands
+        self.stagnation_threshold = stagnation_threshold
+        self.island_spawn_strategy = island_spawn_strategy
+        self.island_spawn_subtree_size = island_spawn_subtree_size
+        self.parent_selection_strategy = parent_selection_strategy
+        self.exploitation_alpha = exploitation_alpha
+        self.exploitation_ratio = exploitation_ratio
+        self.parent_selection_lambda = parent_selection_lambda
+        self.num_beams = num_beams
+        self.archive_selection_strategy = archive_selection_strategy
+        self.archive_criteria = archive_criteria or default_archive_criteria()
+        self.elite_selection_ratio = elite_selection_ratio
+        self.num_archive_inspirations = num_archive_inspirations
+        self.num_top_k_inspirations = num_top_k_inspirations
+        self.enforce_island_separation = enforce_island_separation
         self.embedding_model = embedding_model
         self.conn: Optional[sqlite3.Connection] = None
         self.cursor: Optional[sqlite3.Cursor] = None
@@ -333,7 +415,8 @@ class ProgramDatabase:
         # Initialize island sampler (will be set after db connection)
         self.island_sampler: Optional[IslandSampler] = None
         self.repository_bundle = RepositoryBundle.open(
-            self.config,
+            db_path=self.db_path,
+            num_islands=self.num_islands,
             read_only=self.read_only,
         )
         self.conn = self.repository_bundle.conn
@@ -345,7 +428,11 @@ class ProgramDatabase:
 
         from .archive_policy import create_archive_policy
 
-        self.archive_policy = create_archive_policy(self.config)
+        self.archive_policy = create_archive_policy(
+            archive_selection_strategy=self.archive_selection_strategy,
+            archive_size=self.archive_size,
+            archive_criteria=self.archive_criteria,
+        )
         self._initialize_runtime_services()
 
         count = self._count_programs_in_db()
@@ -362,14 +449,47 @@ class ProgramDatabase:
         self.metadata_repo = bundle.metadata
         self.island_repo = bundle.islands
 
+    @property
+    def config(self) -> DatabaseConfig:
+        warnings.warn(
+            "ProgramDatabase.config is deprecated; use explicit ProgramDatabase "
+            "attributes instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return DatabaseConfig(
+            db_path=self.db_path,
+            num_islands=self.num_islands,
+            archive_size=self.archive_size,
+            elite_selection_ratio=self.elite_selection_ratio,
+            num_archive_inspirations=self.num_archive_inspirations,
+            num_top_k_inspirations=self.num_top_k_inspirations,
+            migration_interval=self.migration_interval,
+            migration_rate=self.migration_rate,
+            island_elitism=self.island_elitism,
+            enforce_island_separation=self.enforce_island_separation,
+            island_selection_strategy=self.island_selection_strategy,
+            enable_dynamic_islands=self.enable_dynamic_islands,
+            stagnation_threshold=self.stagnation_threshold,
+            island_spawn_strategy=self.island_spawn_strategy,
+            island_spawn_subtree_size=self.island_spawn_subtree_size,
+            parent_selection_strategy=self.parent_selection_strategy,
+            exploitation_alpha=self.exploitation_alpha,
+            exploitation_ratio=self.exploitation_ratio,
+            parent_selection_lambda=self.parent_selection_lambda,
+            num_beams=self.num_beams,
+            archive_selection_strategy=self.archive_selection_strategy,
+            archive_criteria=self.archive_criteria,
+        )
+
     def _initialize_runtime_services(self) -> None:
         self.island_manager = CombinedIslandManager(
-            num_islands=self.config.num_islands,
-            migration_interval=self.config.migration_interval,
-            migration_rate=self.config.migration_rate,
-            island_elitism=self.config.island_elitism,
-            island_spawn_strategy=self.config.island_spawn_strategy,
-            island_spawn_subtree_size=self.config.island_spawn_subtree_size,
+            num_islands=self.num_islands,
+            migration_interval=self.migration_interval,
+            migration_rate=self.migration_rate,
+            island_elitism=self.island_elitism,
+            island_spawn_strategy=self.island_spawn_strategy,
+            island_spawn_subtree_size=self.island_spawn_subtree_size,
             program_repository=self.program_repository,
             island_repository=self.island_repo,
             archive_policy=self.archive_policy,
@@ -390,17 +510,19 @@ class ProgramDatabase:
             maybe_spawn_island=self.check_and_spawn_island_if_stagnant,
         )
         self.island_sampler = create_island_sampler(
-            cursor=self.cursor,
-            conn=self.conn,
-            num_islands=self.config.num_islands,
-            strategy=self.config.island_selection_strategy,
+            program_repository=self.program_repository,
+            strategy=self.island_selection_strategy,
         )
         if hasattr(self, "_database_display"):
             delattr(self, "_database_display")
 
     @contextmanager
     def _open_read_repository(self):
-        bundle = RepositoryBundle.open(self.config, read_only=True)
+        bundle = RepositoryBundle.open(
+            db_path=self.db_path,
+            num_islands=self.num_islands,
+            read_only=True,
+        )
         try:
             yield bundle.programs
         finally:
@@ -410,7 +532,8 @@ class ProgramDatabase:
         if not hasattr(self, "_database_display"):
             self._database_display = DatabaseDisplay(
                 program_repository=self.program_repository,
-                config=self.config,
+                archive_size=self.archive_size,
+                num_islands=self.num_islands,
                 island_manager=self.island_manager,
                 archive_policy=self.archive_policy,
                 default_console=self.display_console,
@@ -698,15 +821,28 @@ class ProgramDatabase:
         max_resample_attempts=None,
         with_fix_mode: bool,
     ):
-        if not self.config.db_path:
+        if not self.db_path:
             raise RuntimeError(
-                "Repository-backed context sampling requires config.db_path."
+                "Repository-backed context sampling requires db_path."
             )
 
         from shinka.core.context_sampler import ContextSampler
 
         with self._open_read_repository() as repository:
-            sampler = ContextSampler(repository)
+            sampler = ContextSampler(
+                repository,
+                num_islands=self.num_islands,
+                island_selection_strategy=self.island_selection_strategy,
+                num_archive_inspirations=self.num_archive_inspirations,
+                num_top_k_inspirations=self.num_top_k_inspirations,
+                parent_selection_strategy=self.parent_selection_strategy,
+                exploitation_alpha=self.exploitation_alpha,
+                parent_selection_lambda=self.parent_selection_lambda,
+                num_beams=self.num_beams,
+                enforce_island_separation=self.enforce_island_separation,
+                elite_selection_ratio=self.elite_selection_ratio,
+                archive_policy=self.archive_policy,
+            )
             return sampler.sample(
                 target_generation=target_generation,
                 novelty_attempt=novelty_attempt,
@@ -779,7 +915,7 @@ class ProgramDatabase:
             return
 
         # Main purpose here is to save/commit metadata like last_iteration.
-        current_db_file_path_str = self.config.db_path
+        current_db_file_path_str = self.db_path
         if path and current_db_file_path_str:
             if Path(path).resolve() != Path(current_db_file_path_str).resolve():
                 logger.warning(
@@ -805,20 +941,24 @@ class ProgramDatabase:
     def load(self, path: str) -> None:
         logger.info(f"Loading database from '{path}'...")
         if self.repository_bundle:
-            db_display_name = self.config.db_path or ":memory:"
+            db_display_name = self.db_path or ":memory:"
             logger.info(f"Closing existing connection to '{db_display_name}'.")
             self.repository_bundle.close()
 
-        self.config.db_path = str(Path(path).resolve())
+        self.db_path = str(Path(path).resolve())
         self._set_repository_bundle(
-            RepositoryBundle.open(self.config, read_only=self.read_only)
+            RepositoryBundle.open(
+                db_path=self.db_path,
+                num_islands=self.num_islands,
+                read_only=self.read_only,
+            )
         )
         self._load_metadata_from_db()
         self._initialize_runtime_services()
 
         count = self._count_programs_in_db()
         logger.info(
-            f"Loaded DB from '{db_path_obj}'. {count} programs. "
+            f"Loaded DB from '{self.db_path}'. {count} programs. "
             f"Last iter: {self.last_iteration}."
         )
 
@@ -959,10 +1099,10 @@ class ProgramDatabase:
         Returns:
             True if stagnant (no improvement for stagnation_threshold generations)
         """
-        if not getattr(self.config, "enable_dynamic_islands", False):
+        if not self.enable_dynamic_islands:
             return False
 
-        threshold = getattr(self.config, "stagnation_threshold", 100)
+        threshold = self.stagnation_threshold
         gens_since_improvement = current_generation - self.best_score_generation
 
         return gens_since_improvement >= threshold

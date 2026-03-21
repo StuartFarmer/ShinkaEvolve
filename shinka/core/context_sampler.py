@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import warnings
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -56,13 +57,59 @@ class ContextSampler:
         archive_policy: Optional[ArchivePolicy] = None,
         parent_selector: Optional[ParentSelector] = None,
         inspiration_selector: Optional[InspirationSelector] = None,
+        num_islands: Optional[int] = None,
+        island_selection_strategy: str = "uniform",
+        num_archive_inspirations: int = 1,
+        num_top_k_inspirations: int = 1,
+        parent_selection_strategy: str = "weighted",
+        exploitation_alpha: float = 1.0,
+        parent_selection_lambda: float = 10.0,
+        num_beams: int = 5,
+        enforce_island_separation: bool = True,
+        elite_selection_ratio: float = 0.3,
     ):
         self.repository = repository
-        self.config = repository.config
-        self.archive_policy = archive_policy or create_archive_policy(repository.config)
-        self.parent_selector = parent_selector or ParentSelector(repository.config)
+        legacy_config = getattr(repository, "_legacy_config", None)
+
+        self.num_islands = (
+            repository.num_islands if num_islands is None else num_islands
+        )
+        if legacy_config is not None and island_selection_strategy == "uniform":
+            island_selection_strategy = legacy_config.island_selection_strategy
+        if legacy_config is not None and num_archive_inspirations == 1:
+            num_archive_inspirations = legacy_config.num_archive_inspirations
+        if legacy_config is not None and num_top_k_inspirations == 1:
+            num_top_k_inspirations = legacy_config.num_top_k_inspirations
+        if legacy_config is not None and parent_selection_strategy == "weighted":
+            parent_selection_strategy = legacy_config.parent_selection_strategy
+        if legacy_config is not None and exploitation_alpha == 1.0:
+            exploitation_alpha = legacy_config.exploitation_alpha
+        if legacy_config is not None and parent_selection_lambda == 10.0:
+            parent_selection_lambda = legacy_config.parent_selection_lambda
+        if legacy_config is not None and num_beams == 5:
+            num_beams = legacy_config.num_beams
+        if legacy_config is not None and enforce_island_separation is True:
+            enforce_island_separation = legacy_config.enforce_island_separation
+        if legacy_config is not None and elite_selection_ratio == 0.3:
+            elite_selection_ratio = legacy_config.elite_selection_ratio
+
+        self.island_selection_strategy = island_selection_strategy
+        self.num_archive_inspirations = num_archive_inspirations
+        self.num_top_k_inspirations = num_top_k_inspirations
+        self.archive_policy = archive_policy or (
+            create_archive_policy(legacy_config)
+            if legacy_config is not None
+            else create_archive_policy()
+        )
+        self.parent_selector = parent_selector or ParentSelector(
+            parent_selection_strategy=parent_selection_strategy,
+            exploitation_alpha=exploitation_alpha,
+            parent_selection_lambda=parent_selection_lambda,
+            num_beams=num_beams,
+        )
         self.inspiration_selector = inspiration_selector or InspirationSelector(
-            repository.config
+            enforce_island_separation=enforce_island_separation,
+            elite_selection_ratio=elite_selection_ratio,
         )
 
     def sample(
@@ -104,9 +151,7 @@ class ContextSampler:
             needs_fix = False
 
         if needs_fix:
-            num_ancestors = int(getattr(self.config, "num_archive_inspirations", 0)) + int(
-                getattr(self.config, "num_top_k_inspirations", 0)
-            )
+            num_ancestors = self.num_archive_inspirations + self.num_top_k_inspirations
             ancestor_inspirations = self.repository.get_ancestry(
                 parent.id,
                 max_ancestors=num_ancestors,
@@ -124,8 +169,8 @@ class ContextSampler:
                 max_resample_attempts=max_resample_attempts,
             )
 
-        num_archive = int(getattr(self.config, "num_archive_inspirations", 0))
-        num_topk = int(getattr(self.config, "num_top_k_inspirations", 0))
+        num_archive = self.num_archive_inspirations
+        num_topk = self.num_top_k_inspirations
         archive_inspirations = self.inspiration_selector.select_archive(
             self.repository,
             parent,
@@ -159,7 +204,7 @@ class ContextSampler:
         initialized = self.repository.list_initialized_island_ids()
         if not initialized:
             return False
-        num_islands = int(getattr(self.config, "num_islands", 1))
+        num_islands = int(self.num_islands)
         if num_islands <= 1:
             return True
         return len(initialized) >= num_islands
@@ -183,9 +228,7 @@ class ContextSampler:
             needs_fix = with_fix_mode and not parent.correct
             archive_inspirations: List[Program] = []
             if needs_fix:
-                num_ancestors = int(getattr(self.config, "num_archive_inspirations", 0)) + int(
-                    getattr(self.config, "num_top_k_inspirations", 0)
-                )
+                num_ancestors = self.num_archive_inspirations + self.num_top_k_inspirations
                 archive_inspirations = self.repository.get_ancestry(
                     parent.id,
                     max_ancestors=num_ancestors,
@@ -206,9 +249,7 @@ class ContextSampler:
         incorrect_programs = self.repository.list_incorrect()
         if incorrect_programs:
             parent = random.choice(incorrect_programs)
-            num_ancestors = int(getattr(self.config, "num_archive_inspirations", 0)) + int(
-                getattr(self.config, "num_top_k_inspirations", 0)
-            )
+            num_ancestors = self.num_archive_inspirations + self.num_top_k_inspirations
             archive_inspirations = (
                 self.repository.get_ancestry(parent.id, max_ancestors=num_ancestors)
                 if with_fix_mode
@@ -247,7 +288,7 @@ class ContextSampler:
         if not initialized_islands:
             raise ValueError("No initialized islands available for sampling.")
 
-        strategy = getattr(self.config, "island_selection_strategy", "uniform")
+        strategy = self.island_selection_strategy
         if strategy == "uniform":
             return random.choice(initialized_islands).island_idx
 
@@ -302,8 +343,52 @@ class AsyncContextSampler:
     from concurrent writer state and avoids shared-cursor coupling.
     """
 
-    def __init__(self, db_config: DatabaseConfig):
-        self.db_config = db_config
+    def __init__(
+        self,
+        db_config: Optional[DatabaseConfig] = None,
+        *,
+        db_path: Optional[str] = None,
+        num_islands: int = 2,
+        island_selection_strategy: str = "uniform",
+        num_archive_inspirations: int = 1,
+        num_top_k_inspirations: int = 1,
+        parent_selection_strategy: str = "weighted",
+        exploitation_alpha: float = 1.0,
+        parent_selection_lambda: float = 10.0,
+        num_beams: int = 5,
+        enforce_island_separation: bool = True,
+        elite_selection_ratio: float = 0.3,
+    ):
+        if db_config is not None:
+            warnings.warn(
+                "Passing DatabaseConfig into AsyncContextSampler() is deprecated; "
+                "pass explicit init args instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            db_path = db_config.db_path
+            num_islands = db_config.num_islands
+            island_selection_strategy = db_config.island_selection_strategy
+            num_archive_inspirations = db_config.num_archive_inspirations
+            num_top_k_inspirations = db_config.num_top_k_inspirations
+            parent_selection_strategy = db_config.parent_selection_strategy
+            exploitation_alpha = db_config.exploitation_alpha
+            parent_selection_lambda = db_config.parent_selection_lambda
+            num_beams = db_config.num_beams
+            enforce_island_separation = db_config.enforce_island_separation
+            elite_selection_ratio = db_config.elite_selection_ratio
+
+        self.db_path = db_path
+        self.num_islands = num_islands
+        self.island_selection_strategy = island_selection_strategy
+        self.num_archive_inspirations = num_archive_inspirations
+        self.num_top_k_inspirations = num_top_k_inspirations
+        self.parent_selection_strategy = parent_selection_strategy
+        self.exploitation_alpha = exploitation_alpha
+        self.parent_selection_lambda = parent_selection_lambda
+        self.num_beams = num_beams
+        self.enforce_island_separation = enforce_island_separation
+        self.elite_selection_ratio = elite_selection_ratio
         self._lock = asyncio.Lock()
 
     async def sample(
@@ -317,9 +402,25 @@ class AsyncContextSampler:
         with_fix_mode: bool = True,
     ) -> SampledContext:
         async with self._lock:
-            repository = ProgramRepository.from_config(self.db_config, read_only=True)
+            repository = ProgramRepository(
+                self.db_path,
+                num_islands=self.num_islands,
+                read_only=True,
+            )
             try:
-                sampler = ContextSampler(repository)
+                sampler = ContextSampler(
+                    repository,
+                    num_islands=self.num_islands,
+                    island_selection_strategy=self.island_selection_strategy,
+                    num_archive_inspirations=self.num_archive_inspirations,
+                    num_top_k_inspirations=self.num_top_k_inspirations,
+                    parent_selection_strategy=self.parent_selection_strategy,
+                    exploitation_alpha=self.exploitation_alpha,
+                    parent_selection_lambda=self.parent_selection_lambda,
+                    num_beams=self.num_beams,
+                    enforce_island_separation=self.enforce_island_separation,
+                    elite_selection_ratio=self.elite_selection_ratio,
+                )
                 return sampler.sample(
                     target_generation=target_generation,
                     novelty_attempt=novelty_attempt,

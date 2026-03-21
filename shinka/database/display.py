@@ -19,13 +19,15 @@ class DatabaseDisplay:
         self,
         *,
         program_repository,
-        config,
+        archive_size: int,
+        num_islands: int,
         island_manager,
         archive_policy,
         default_console: Optional[RichConsole] = None,
     ):
         self.program_repository = program_repository
-        self.config = config
+        self.archive_size = archive_size
+        self.num_islands = num_islands
         self.island_manager = island_manager
         self.archive_policy = archive_policy
         self.default_console = default_console
@@ -216,15 +218,15 @@ class DatabaseDisplay:
             f"[bold]{len(correct_programs)}[/bold] / {total_programs} ({correct_percentage:.0f}%)",
         )
         archive_percentage = (
-            (len(archive_programs) / self.config.archive_size * 100)
-            if self.config.archive_size > 0
+            (len(archive_programs) / self.archive_size * 100)
+            if self.archive_size > 0
             else 0
         )
         summary_table.add_row(
             "Archived Programs",
-            f"[bold]{len(archive_programs)}[/bold] / {self.config.archive_size} ({archive_percentage:.0f}%)",
+            f"[bold]{len(archive_programs)}[/bold] / {self.archive_size} ({archive_percentage:.0f}%)",
         )
-        if hasattr(self.config, "num_islands") and self.config.num_islands > 0:
+        if self.num_islands > 0:
             summary_table.add_row("Island Populations", self.island_manager.format_island_display())
             migration_info = self.island_manager.get_migration_info()
             if migration_info:

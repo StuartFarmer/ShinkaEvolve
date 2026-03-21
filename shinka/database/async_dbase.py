@@ -100,7 +100,27 @@ class AsyncProgramDatabase:
             embedding_recompute_interval: Programs to add before recomputing
             enable_deadlock_debugging: Enable detailed deadlock monitoring and logging
         """
-        self.config = sync_db.config
+        self.db_path = sync_db.db_path
+        self.num_islands = sync_db.num_islands
+        self.migration_interval = sync_db.migration_interval
+        self.migration_rate = sync_db.migration_rate
+        self.island_elitism = sync_db.island_elitism
+        self.enable_dynamic_islands = sync_db.enable_dynamic_islands
+        self.stagnation_threshold = sync_db.stagnation_threshold
+        self.island_spawn_strategy = sync_db.island_spawn_strategy
+        self.island_spawn_subtree_size = sync_db.island_spawn_subtree_size
+        self.archive_selection_strategy = sync_db.archive_selection_strategy
+        self.archive_size = sync_db.archive_size
+        self.archive_criteria = sync_db.archive_criteria
+        self.island_selection_strategy = sync_db.island_selection_strategy
+        self.num_archive_inspirations = sync_db.num_archive_inspirations
+        self.num_top_k_inspirations = sync_db.num_top_k_inspirations
+        self.parent_selection_strategy = sync_db.parent_selection_strategy
+        self.exploitation_alpha = sync_db.exploitation_alpha
+        self.parent_selection_lambda = sync_db.parent_selection_lambda
+        self.num_beams = sync_db.num_beams
+        self.enforce_island_separation = sync_db.enforce_island_separation
+        self.elite_selection_ratio = sync_db.elite_selection_ratio
         self.embedding_model = sync_db.embedding_model
         self.ensure_embedding_client = sync_db._ensure_embedding_client
         self.update_last_iteration = lambda value: setattr(
@@ -156,9 +176,9 @@ class AsyncProgramDatabase:
             db_debugger.track_end(op_id, success=success)
 
     def _open_repository(self, *, read_only: bool) -> ProgramRepository:
-        return ProgramRepository.from_config(
-            self.config,
-            embedding_model=self.embedding_model,
+        return ProgramRepository(
+            self.db_path,
+            num_islands=self.num_islands,
             read_only=read_only,
         )
 
@@ -214,7 +234,19 @@ class AsyncProgramDatabase:
                         from shinka.core.context_sampler import ContextSampler
 
                         repo = self._open_repository(read_only=True)
-                        sampler = ContextSampler(repo)
+                        sampler = ContextSampler(
+                            repo,
+                            num_islands=self.num_islands,
+                            island_selection_strategy=self.island_selection_strategy,
+                            num_archive_inspirations=self.num_archive_inspirations,
+                            num_top_k_inspirations=self.num_top_k_inspirations,
+                            parent_selection_strategy=self.parent_selection_strategy,
+                            exploitation_alpha=self.exploitation_alpha,
+                            parent_selection_lambda=self.parent_selection_lambda,
+                            num_beams=self.num_beams,
+                            enforce_island_separation=self.enforce_island_separation,
+                            elite_selection_ratio=self.elite_selection_ratio,
+                        )
                         sampled = sampler.sample(
                             target_generation=target_generation,
                             novelty_attempt=novelty_attempt,
@@ -283,7 +315,19 @@ class AsyncProgramDatabase:
                         from shinka.core.context_sampler import ContextSampler
 
                         repo = self._open_repository(read_only=True)
-                        sampler = ContextSampler(repo)
+                        sampler = ContextSampler(
+                            repo,
+                            num_islands=self.num_islands,
+                            island_selection_strategy=self.island_selection_strategy,
+                            num_archive_inspirations=self.num_archive_inspirations,
+                            num_top_k_inspirations=self.num_top_k_inspirations,
+                            parent_selection_strategy=self.parent_selection_strategy,
+                            exploitation_alpha=self.exploitation_alpha,
+                            parent_selection_lambda=self.parent_selection_lambda,
+                            num_beams=self.num_beams,
+                            enforce_island_separation=self.enforce_island_separation,
+                            elite_selection_ratio=self.elite_selection_ratio,
+                        )
                         sampled = sampler.sample(
                             target_generation=target_generation,
                             novelty_attempt=novelty_attempt,
@@ -547,15 +591,19 @@ class AsyncProgramDatabase:
         bundle: RepositoryBundle,
     ) -> ProgramWriteService:
         island_manager = CombinedIslandManager(
-            num_islands=self.config.num_islands,
-            migration_interval=self.config.migration_interval,
-            migration_rate=self.config.migration_rate,
-            island_elitism=self.config.island_elitism,
-            island_spawn_strategy=self.config.island_spawn_strategy,
-            island_spawn_subtree_size=self.config.island_spawn_subtree_size,
+            num_islands=self.num_islands,
+            migration_interval=self.migration_interval,
+            migration_rate=self.migration_rate,
+            island_elitism=self.island_elitism,
+            island_spawn_strategy=self.island_spawn_strategy,
+            island_spawn_subtree_size=self.island_spawn_subtree_size,
             program_repository=bundle.programs,
             island_repository=bundle.islands,
-            archive_policy=create_archive_policy(self.config),
+            archive_policy=create_archive_policy(
+                archive_selection_strategy=self.archive_selection_strategy,
+                archive_size=self.archive_size,
+                archive_criteria=self.archive_criteria,
+            ),
         )
 
         def update_best_metadata(program: Program) -> None:
@@ -576,9 +624,9 @@ class AsyncProgramDatabase:
                 bundle.programs.set_metadata("best_score_ever", str(score))
 
         def maybe_spawn_island(current_generation: int) -> bool:
-            if not self.config.enable_dynamic_islands:
+            if not self.enable_dynamic_islands:
                 return False
-            threshold = self.config.stagnation_threshold
+            threshold = self.stagnation_threshold
             best_gen_raw = bundle.programs.get_metadata("best_score_generation", "0")
             best_generation = int(best_gen_raw or 0)
             if current_generation - best_generation < threshold:
@@ -618,7 +666,8 @@ class AsyncProgramDatabase:
             bundle = None
             try:
                 bundle = RepositoryBundle.open(
-                    self.config,
+                    db_path=self.db_path,
+                    num_islands=self.num_islands,
                     read_only=False,
                 )
                 write_service = self._build_thread_write_service(bundle)
@@ -685,7 +734,8 @@ class AsyncProgramDatabase:
         bundle = None
         try:
             bundle = RepositoryBundle.open(
-                self.config,
+                db_path=self.db_path,
+                num_islands=self.num_islands,
                 read_only=False,
             )
             service = self._build_thread_embedding_service(bundle)
@@ -709,12 +759,9 @@ class AsyncProgramDatabase:
 
             def get_thread_safe():
                 thread_op_id = self._debug_track_start("get_thread_safe")
+                thread_db = None
                 try:
-                    thread_db = ProgramRepository.from_config(
-                        self.config,
-                        embedding_model=self.embedding_model,
-                        read_only=True,
-                    )
+                    thread_db = self._open_repository(read_only=True)
                     try:
                         result = thread_db.get(program_id)
                         self._debug_track_end(thread_op_id, success=True)
@@ -744,12 +791,9 @@ class AsyncProgramDatabase:
 
             def get_best_thread_safe():
                 thread_op_id = self._debug_track_start("get_best_thread_safe")
+                thread_db = None
                 try:
-                    thread_db = ProgramRepository.from_config(
-                        self.config,
-                        embedding_model=self.embedding_model,
-                        read_only=True,
-                    )
+                    thread_db = self._open_repository(read_only=True)
                     try:
                         result = thread_db.get_best()
                         self._debug_track_end(thread_op_id, success=True)
@@ -909,10 +953,7 @@ class AsyncProgramDatabase:
                 """Thread-safe program counting."""
                 thread_db = None
                 try:
-                    thread_db = ProgramRepository.from_config(
-                        self.config,
-                        read_only=True,
-                    )
+                    thread_db = self._open_repository(read_only=True)
                     return thread_db.get_count_snapshot().count
                 finally:
                     if thread_db:

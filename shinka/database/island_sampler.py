@@ -2,11 +2,13 @@
 
 import logging
 import random
-import sqlite3
 from abc import ABC, abstractmethod
-from typing import List
+from typing import TYPE_CHECKING, List
 import numpy as np
-from .island_repository import IslandRepository, Island
+from .island_repository import Island
+
+if TYPE_CHECKING:
+    from .repository import ProgramRepository
 
 logger = logging.getLogger(__name__)
 
@@ -16,18 +18,9 @@ class IslandSampler(ABC):
 
     def __init__(
         self,
-        cursor: sqlite3.Cursor,
-        conn: sqlite3.Connection,
-        num_islands: int,
+        program_repository: "ProgramRepository",
     ):
-        self.cursor = cursor
-        self.conn = conn
-        self.num_islands = num_islands
-        self.repository = IslandRepository(
-            conn=conn,
-            cursor=cursor,
-            num_islands=num_islands,
-        )
+        self.program_repository = program_repository
 
     @abstractmethod
     def sample_island(self, initialized_islands: List[Island]) -> int:
@@ -42,12 +35,15 @@ class IslandSampler(ABC):
         pass
 
     def _normalize_islands(self, initialized_islands: List[Island | int]) -> List[Island]:
+        island_map = {
+            island.island_idx: island for island in self.program_repository.list_islands()
+        }
         normalized: List[Island] = []
         for island in initialized_islands:
             if isinstance(island, Island):
                 normalized.append(island)
             else:
-                normalized.append(self.repository.get_island(int(island)))
+                normalized.append(island_map[int(island)])
         return normalized
 
 
@@ -92,12 +88,10 @@ class ProportionalIslandSampler(IslandSampler):
 
     def __init__(
         self,
-        cursor: sqlite3.Cursor,
-        conn: sqlite3.Connection,
-        num_islands: int,
+        program_repository: "ProgramRepository",
         temperature: float = 1.0,
     ):
-        super().__init__(cursor, conn, num_islands)
+        super().__init__(program_repository)
         self.temperature = temperature
 
     def sample_island(self, initialized_islands: List[Island | int]) -> int:
@@ -131,13 +125,11 @@ class WeightedIslandSampler(IslandSampler):
 
     def __init__(
         self,
-        cursor: sqlite3.Cursor,
-        conn: sqlite3.Connection,
-        num_islands: int,
+        program_repository: "ProgramRepository",
         fitness_weight: float = 1.0,
         count_weight: float = 1.0,
     ):
-        super().__init__(cursor, conn, num_islands)
+        super().__init__(program_repository)
         self.fitness_weight = fitness_weight
         self.count_weight = count_weight
 
@@ -177,17 +169,13 @@ class WeightedIslandSampler(IslandSampler):
 
 
 def create_island_sampler(
-    cursor: sqlite3.Cursor,
-    conn: sqlite3.Connection,
-    num_islands: int,
+    program_repository: "ProgramRepository",
     strategy: str = "uniform",
 ) -> IslandSampler:
     """Factory function to create island samplers.
 
     Args:
-        cursor: Database cursor
-        conn: Database connection
-    num_islands: Number of configured base islands
+        program_repository: Program repository
         strategy: Sampling strategy name
 
     Returns:
@@ -197,14 +185,16 @@ def create_island_sampler(
         ValueError: If strategy is unknown
     """
     if strategy == "uniform":
-        return UniformIslandSampler(cursor, conn, num_islands)
+        return UniformIslandSampler(program_repository)
     elif strategy == "equal":
-        return EqualIslandSampler(cursor, conn, num_islands)
+        return EqualIslandSampler(program_repository)
     elif strategy == "proportional":
-        return ProportionalIslandSampler(cursor, conn, num_islands, temperature=1.0)
+        return ProportionalIslandSampler(program_repository, temperature=1.0)
     elif strategy == "weighted":
         return WeightedIslandSampler(
-            cursor, conn, num_islands, fitness_weight=1.0, count_weight=1.0
+            program_repository,
+            fitness_weight=1.0,
+            count_weight=1.0,
         )
     else:
         raise ValueError(

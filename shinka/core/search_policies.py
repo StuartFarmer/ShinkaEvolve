@@ -56,8 +56,18 @@ def _sort_programs_by_score(programs: Sequence[Program]) -> List[Program]:
 class ParentSelector:
     """Repository-backed parent selection policy."""
 
-    def __init__(self, config: Any):
-        self.config = config
+    def __init__(
+        self,
+        *,
+        parent_selection_strategy: str = "weighted",
+        exploitation_alpha: float = 1.0,
+        parent_selection_lambda: float = 10.0,
+        num_beams: int = 5,
+    ):
+        self.parent_selection_strategy = parent_selection_strategy
+        self.exploitation_alpha = exploitation_alpha
+        self.parent_selection_lambda = parent_selection_lambda
+        self.num_beams = num_beams
 
     def has_correct_programs(
         self,
@@ -102,7 +112,7 @@ class ParentSelector:
         *,
         island_idx: Optional[int] = None,
     ) -> Program:
-        strategy_name = getattr(self.config, "parent_selection_strategy", "weighted")
+        strategy_name = self.parent_selection_strategy
 
         if strategy_name == "power_law":
             parent = self._select_power_law(repository, archive_programs, island_idx)
@@ -157,13 +167,11 @@ class ParentSelector:
     ) -> Optional[Program]:
         candidates = self._archive_candidates(archive_programs, island_idx)
         if candidates:
-            alpha = getattr(self.config, "exploitation_alpha", 1.0)
-            return _sample_with_powerlaw(candidates, alpha)
+            return _sample_with_powerlaw(candidates, self.exploitation_alpha)
 
         candidates = self._correct_candidates(repository, island_idx)
         if candidates:
-            alpha = getattr(self.config, "exploitation_alpha", 1.0)
-            return _sample_with_powerlaw(candidates, alpha)
+            return _sample_with_powerlaw(candidates, self.exploitation_alpha)
 
         return repository.get_best(island_idx=island_idx)
 
@@ -182,7 +190,7 @@ class ParentSelector:
         score_deviations = [abs(score - alpha_0) for score in scores]
         mad = float(np.median(score_deviations)) if score_deviations else 1.0
         scale_factor = max(mad, 1e-6)
-        lambda_ = float(getattr(self.config, "parent_selection_lambda", 10.0))
+        lambda_ = float(self.parent_selection_lambda)
 
         weights = []
         for program in candidates:
@@ -205,7 +213,7 @@ class ParentSelector:
         repository: ProgramRepository,
         island_idx: Optional[int],
     ) -> Optional[Program]:
-        num_beams = int(getattr(self.config, "num_beams", 5))
+        num_beams = int(self.num_beams)
         beam_parent_id = repository.get_metadata("beam_search_parent_id")
 
         if beam_parent_id:
@@ -265,8 +273,14 @@ class ParentSelector:
 class InspirationSelector:
     """Repository-backed inspiration selection policy."""
 
-    def __init__(self, config: Any):
-        self.config = config
+    def __init__(
+        self,
+        *,
+        enforce_island_separation: bool = False,
+        elite_selection_ratio: float = 0.0,
+    ):
+        self.enforce_island_separation = enforce_island_separation
+        self.elite_selection_ratio = elite_selection_ratio
 
     def select_archive(
         self,
@@ -279,7 +293,7 @@ class InspirationSelector:
         if n <= 0:
             return []
 
-        enforce_separation = getattr(self.config, "enforce_island_separation", False)
+        enforce_separation = self.enforce_island_separation
         parent_island_idx = parent.island_idx
         inspirations: List[Program] = []
         selected_ids = {parent.id}
@@ -305,7 +319,7 @@ class InspirationSelector:
             inspirations.append(best_program)
             selected_ids.add(best_program.id)
 
-        num_elites = max(0, int(n * getattr(self.config, "elite_selection_ratio", 0.0)))
+        num_elites = max(0, int(n * self.elite_selection_ratio))
         for program in _sort_programs_by_score(candidate_archive):
             if len(inspirations) >= n or len(inspirations) >= num_elites + (1 if best_program else 0):
                 break
@@ -352,7 +366,7 @@ class InspirationSelector:
         if k <= 0:
             return []
 
-        enforce_separation = getattr(self.config, "enforce_island_separation", False)
+        enforce_separation = self.enforce_island_separation
         parent_island_idx = parent.island_idx
         excluded_ids = {parent.id}
         excluded_ids.update(program.id for program in excluded_programs)

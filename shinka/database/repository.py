@@ -18,6 +18,7 @@ import math
 import sqlite3
 import time
 import uuid
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -71,11 +72,27 @@ class ProgramCountSnapshot:
 class ProgramRepository:
     def __init__(
         self,
-        config: DatabaseConfig,
+        db_path: Optional[str] | DatabaseConfig = None,
         *,
+        num_islands: int = 2,
         read_only: bool = False,
+        config: Optional[DatabaseConfig] = None,
     ):
-        self.config = config
+        if config is None and isinstance(db_path, DatabaseConfig):
+            config = db_path
+        if config is not None:
+            warnings.warn(
+                "Passing DatabaseConfig into ProgramRepository() is deprecated; "
+                "pass db_path/num_islands explicitly.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            db_path = config.db_path
+            num_islands = config.num_islands
+
+        self.db_path = db_path
+        self.num_islands = num_islands
+        self._legacy_config = config
         self.read_only = read_only
         self.conn: sqlite3.Connection | None = None
         self.cursor: sqlite3.Cursor | None = None
@@ -100,7 +117,12 @@ class ProgramRepository:
         read_only: bool = False,
     ) -> ProgramRepository:
         _ = embedding_model
-        return cls(config=config, read_only=read_only)
+        return cls(
+            db_path=config.db_path,
+            num_islands=config.num_islands,
+            read_only=read_only,
+            config=config,
+        )
 
     @classmethod
     def from_db_path(
@@ -110,23 +132,23 @@ class ProgramRepository:
         num_islands: int = 0,
         read_only: bool = False,
     ) -> ProgramRepository:
-        return cls(
-            config=DatabaseConfig(db_path=db_path, num_islands=num_islands),
-            read_only=read_only,
-        )
+        return cls(db_path=db_path, num_islands=num_islands, read_only=read_only)
 
     @classmethod
     def from_existing_connection(
         cls,
         *,
-        config: DatabaseConfig,
+        db_path: Optional[str] = None,
+        num_islands: int = 2,
         conn: sqlite3.Connection,
         cursor: sqlite3.Cursor,
         read_only: bool = False,
         ensure_schema: bool = False,
     ) -> ProgramRepository:
         repo = cls.__new__(cls)
-        repo.config = config
+        repo.db_path = db_path
+        repo.num_islands = num_islands
+        repo._legacy_config = None
         repo.read_only = read_only
         repo.conn = conn
         repo.cursor = cursor
@@ -151,7 +173,7 @@ class ProgramRepository:
         repo.island_repo = IslandRepository(
             conn=conn,
             cursor=cursor,
-            num_islands=config.num_islands,
+            num_islands=num_islands,
         )
         if ensure_schema and not read_only:
             repo._ensure_schema()
@@ -159,7 +181,7 @@ class ProgramRepository:
         return repo
 
     def _connect(self) -> None:
-        db_path_str = self.config.db_path
+        db_path_str = self.db_path
         if db_path_str:
             db_file = Path(db_path_str).resolve()
             if self.read_only:
@@ -177,7 +199,7 @@ class ProgramRepository:
                 self.conn = sqlite3.connect(str(db_file), timeout=30.0)
         else:
             if self.read_only:
-                raise ValueError("Read-only repository requires config.db_path")
+                raise ValueError("Read-only repository requires db_path")
             self.conn = sqlite3.connect(":memory:", timeout=30.0)
 
         self.conn.row_factory = sqlite3.Row
@@ -201,7 +223,20 @@ class ProgramRepository:
         self.island_repo = IslandRepository(
             conn=self.conn,
             cursor=self.cursor,
-            num_islands=self.config.num_islands,
+            num_islands=self.num_islands,
+        )
+
+    @property
+    def config(self) -> DatabaseConfig:
+        warnings.warn(
+            "ProgramRepository.config is deprecated; read repository attributes "
+            "directly instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return DatabaseConfig(
+            db_path=self.db_path,
+            num_islands=self.num_islands,
         )
 
     def _ensure_schema(self) -> None:
@@ -989,7 +1024,11 @@ class ProgramRepository:
     def db(self):
         from .dbase import ProgramDatabase
 
-        return ProgramDatabase(self.config, read_only=self.read_only)
+        return ProgramDatabase(
+            db_path=self.db_path,
+            num_islands=self.num_islands,
+            read_only=self.read_only,
+        )
 
     def close(self) -> None:
         if self.conn:

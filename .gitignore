@@ -5,11 +5,16 @@ __pycache__/
 .DS_Store
 results/
 examples/*
+planning/
 !examples/circle_packing
 !examples/game_2048
 !examples/julia_prime_counting
 !examples/novelty_generator
 !examples/python_problem_template
+!examples/feature_learnability_matrix_model
+!examples/feature_learnability_matrix_model/**
+examples/feature_learnability_matrix_model/data/*
+!examples/feature_learnability_matrix_model/data/.gitkeep
 
 # C extensions
 *.so

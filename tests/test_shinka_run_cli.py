@@ -26,6 +26,31 @@ def _make_task_dir(tmp_path: Path, *, include_evaluate: bool = True) -> Path:
     return task_dir
 
 
+def _remove_initial_program(task_dir: Path) -> None:
+    for path in task_dir.glob("initial.*"):
+        path.unlink()
+
+
+def _make_family_seed(
+    task_dir: Path,
+    family_name: str,
+    *,
+    context: str | None = None,
+) -> Path:
+    family_dir = task_dir / "seeds" / family_name
+    family_dir.mkdir(parents=True, exist_ok=True)
+    (family_dir / "init_program.py").write_text(
+        "# EVOLVE-BLOCK-START\n"
+        "def run():\n"
+        "    return 1\n"
+        "# EVOLVE-BLOCK-END\n",
+        encoding="utf-8",
+    )
+    if context is not None:
+        (family_dir / "CONTEXT.md").write_text(context, encoding="utf-8")
+    return family_dir
+
+
 class _DummyRunner:
     last_kwargs = None
     run_calls = 0
@@ -336,6 +361,131 @@ def test_shinka_run_requires_evaluate_file(tmp_path):
                 "5",
             ]
         )
+    assert exc_info.value.code == 2
+
+
+def test_shinka_run_accepts_island_seeds_without_initial_file(tmp_path, monkeypatch):
+    _reset_dummy_runner()
+    task_dir = _make_task_dir(tmp_path)
+    _remove_initial_program(task_dir)
+    results_dir = tmp_path / "results_seed_only"
+    monkeypatch.setattr(cli_run, "ShinkaEvolveRunner", _DummyRunner)
+
+    exit_code = cli_run.main(
+        [
+            "--task-dir",
+            str(task_dir),
+            "--results_dir",
+            str(results_dir),
+            "--num_generations",
+            "3",
+            "--set",
+            'evo.island_seeds=[{"family_id":"linear_rls","init_program_path":"seed_linear.py"}]',
+        ]
+    )
+
+    assert exit_code == 0
+    assert _DummyRunner.last_kwargs is not None
+    assert _DummyRunner.last_kwargs["init_program_str"] is None
+    assert _DummyRunner.last_kwargs["evo_config"].language == "python"
+    assert _DummyRunner.last_kwargs["evo_config"].island_seeds == [
+        {"family_id": "linear_rls", "init_program_path": "seed_linear.py"}
+    ]
+
+
+def test_shinka_run_discovers_family_seed_directories(tmp_path, monkeypatch):
+    _reset_dummy_runner()
+    task_dir = _make_task_dir(tmp_path)
+    _remove_initial_program(task_dir)
+    _make_family_seed(
+        task_dir,
+        "linear_rls",
+        context="Linear online regression with forgetting.",
+    )
+    _make_family_seed(
+        task_dir,
+        "mean_variance",
+        context="Risk-aware certainty-equivalent sizing.",
+    )
+    results_dir = tmp_path / "results_family_dirs"
+    monkeypatch.setattr(cli_run, "ShinkaEvolveRunner", _DummyRunner)
+
+    exit_code = cli_run.main(
+        [
+            "--task-dir",
+            str(task_dir),
+            "--results_dir",
+            str(results_dir),
+            "--num_generations",
+            "3",
+        ]
+    )
+
+    assert exit_code == 0
+    assert _DummyRunner.last_kwargs is not None
+    assert _DummyRunner.last_kwargs["init_program_str"] is None
+
+    evo_config = _DummyRunner.last_kwargs["evo_config"]
+    assert evo_config.language == "python"
+    assert evo_config.island_seeds is not None
+    assert [seed["family_id"] for seed in evo_config.island_seeds] == [
+        "linear_rls",
+        "mean_variance",
+    ]
+    assert evo_config.island_seeds[0]["context"] == (
+        "Linear online regression with forgetting."
+    )
+    assert evo_config.island_seeds[1]["context"] == (
+        "Risk-aware certainty-equivalent sizing."
+    )
+    assert evo_config.island_seeds[0]["island_idx"] == 0
+    assert evo_config.island_seeds[1]["island_idx"] == 1
+    assert evo_config.island_seeds[0]["init_program_path"].endswith(
+        "seeds/linear_rls/init_program.py"
+    )
+
+
+def test_shinka_run_seed_directories_require_init_program(tmp_path):
+    task_dir = _make_task_dir(tmp_path)
+    _remove_initial_program(task_dir)
+    broken_family_dir = task_dir / "seeds" / "broken_family"
+    broken_family_dir.mkdir(parents=True)
+    (broken_family_dir / "CONTEXT.md").write_text(
+        "This family forgot its seed program.",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli_run.main(
+            [
+                "--task-dir",
+                str(task_dir),
+                "--results_dir",
+                str(tmp_path / "results_broken_seed_dir"),
+                "--num_generations",
+                "3",
+            ]
+        )
+
+    assert exc_info.value.code == 2
+
+
+def test_shinka_run_requires_initial_or_island_seeds(tmp_path):
+    task_dir = _make_task_dir(tmp_path)
+    _remove_initial_program(task_dir)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli_run.main(
+            [
+                "--task-dir",
+                str(task_dir),
+                "--results_dir",
+                str(tmp_path / "results"),
+                "--num_generations",
+                "5",
+            ]
+        )
+
     assert exc_info.value.code == 2
 
 

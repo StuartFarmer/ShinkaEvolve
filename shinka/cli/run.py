@@ -51,7 +51,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "Run async Shinka evolution from a task directory.\n\n"
         "Task directory contract:\n"
         "  - evaluate.py\n"
-        "  - initial.<ext> (e.g. initial.py, initial.jl)"
+        "  - one bootstrap source:\n"
+        "      * initial.<ext> (e.g. initial.py, initial.jl), or\n"
+        "      * seeds/<family>/init_program.py with optional seeds/<family>/CONTEXT.md, or\n"
+        "      * evo.island_seeds with at least one seed program"
     )
     epilog = (
         "Override grammar:\n"
@@ -91,7 +94,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "Failure behavior:\n"
         "  - unknown namespace/field: non-zero exit\n"
         "  - invalid value type: non-zero exit\n"
-        "  - missing evaluate.py or initial.<ext>/invalid --config-fname YAML: non-zero exit\n\n"
+        "  - missing evaluate.py or missing all bootstrap sources: non-zero exit\n"
+        "  - invalid --config-fname YAML: non-zero exit\n\n"
         "Precedence:\n"
         "  - --config-fname YAML loads first; --set overrides config YAML\n"
         "  - --results_dir always sets evo.results_dir\n"
@@ -109,7 +113,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--task-dir",
         type=Path,
         required=True,
-        help="Directory containing evaluate.py and initial.<ext>.",
+        help="Directory containing evaluate.py and either initial.<ext>, seeds/<family>/init_program.py, or seed configs via evo.island_seeds.",
     )
     required_group.add_argument(
         "--results_dir",
@@ -333,6 +337,35 @@ def _detect_initial_program(task_dir: Path) -> Path:
     return sorted_candidates[0]
 
 
+def _discover_family_seed_dirs(task_dir: Path) -> list[dict[str, Any]]:
+    seeds_root = task_dir / "seeds"
+    if not seeds_root.exists():
+        return []
+    if not seeds_root.is_dir():
+        raise FileNotFoundError(f"Seeds path is not a directory: {seeds_root}")
+
+    discovered_seeds: list[dict[str, Any]] = []
+    family_dirs = sorted(path for path in seeds_root.iterdir() if path.is_dir())
+    for island_idx, family_dir in enumerate(family_dirs):
+        init_program_path = family_dir / "init_program.py"
+        if not init_program_path.exists():
+            raise FileNotFoundError(
+                f"Missing init_program.py for family seed directory: {family_dir}"
+            )
+        context_path = family_dir / "CONTEXT.md"
+        seed: dict[str, Any] = {
+            "family_id": family_dir.name,
+            "family_name": family_dir.name.replace("_", " ").strip(),
+            "island_idx": island_idx,
+            "init_program_path": str(init_program_path.resolve()),
+        }
+        if context_path.exists():
+            seed["context"] = context_path.read_text(encoding="utf-8").strip()
+        discovered_seeds.append(seed)
+
+    return discovered_seeds
+
+
 def _infer_language(initial_program_path: Path) -> str:
     suffix = initial_program_path.suffix.lower()
     if suffix not in SUPPORTED_INITIAL_EXTENSIONS:
@@ -370,7 +403,7 @@ def _build_default_job_values(evaluate_path: Path) -> Dict[str, Any]:
     return asdict(LocalJobConfig(eval_program_path=str(evaluate_path)))
 
 
-def _validate_task_dir(task_dir: Path) -> tuple[Path, Path]:
+def _validate_task_dir(task_dir: Path) -> Path:
     if not task_dir.exists():
         raise FileNotFoundError(f"Task dir does not exist: {task_dir}")
     if not task_dir.is_dir():
@@ -378,8 +411,7 @@ def _validate_task_dir(task_dir: Path) -> tuple[Path, Path]:
     evaluate_path = task_dir / "evaluate.py"
     if not evaluate_path.exists():
         raise FileNotFoundError(f"Missing evaluate.py in task dir: {task_dir}")
-    initial_path = _detect_initial_program(task_dir)
-    return evaluate_path, initial_path
+    return evaluate_path
 
 
 def _build_runner(
@@ -388,7 +420,7 @@ def _build_runner(
     evo_config: EvolutionConfig,
     db_config: DatabaseConfig,
     job_config: LocalJobConfig,
-    init_program_str: str,
+    init_program_str: Optional[str],
     evaluate_str: str,
 ) -> ShinkaEvolveRunner:
     runner_kwargs: Dict[str, Any] = {
@@ -417,8 +449,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     results_dir = args.results_dir.resolve()
 
     try:
-        evaluate_path, initial_path = _validate_task_dir(task_dir)
-        language = _infer_language(initial_path)
+        evaluate_path = _validate_task_dir(task_dir)
         allowed_types = _field_types()
         file_overrides, runner_config = load_optional_yaml_config(
             task_dir=task_dir,
@@ -427,14 +458,69 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         parsed_overrides = _parse_overrides(args.overrides, allowed_types)
 
+        try:
+            initial_path: Optional[Path] = _detect_initial_program(task_dir)
+        except FileNotFoundError:
+            initial_path = None
+
+        configured_island_seeds = parsed_overrides["evo"].get(
+            "island_seeds",
+            file_overrides["evo"].get("island_seeds"),
+        )
+        discovered_island_seeds = (
+            []
+            if isinstance(configured_island_seeds, list)
+            and len(configured_island_seeds) > 0
+            else _discover_family_seed_dirs(task_dir)
+        )
+        island_seeds = (
+            configured_island_seeds
+            if isinstance(configured_island_seeds, list)
+            and len(configured_island_seeds) > 0
+            else discovered_island_seeds
+        )
+        has_island_seeds = len(island_seeds) > 0
+        if initial_path is None and not has_island_seeds:
+            raise FileNotFoundError(
+                "Missing bootstrap source: provide initial.<ext>, add "
+                "seeds/<family>/init_program.py, or set evo.island_seeds with "
+                "at least one seed."
+            )
+
+        language_source: Optional[Path] = initial_path
+        if language_source is None and has_island_seeds:
+            first_seed = island_seeds[0]
+            if not isinstance(first_seed, dict):
+                raise ValueError(
+                    "Each evo.island_seeds entry must be a JSON object."
+                )
+            init_program_path = first_seed.get("init_program_path")
+            if not init_program_path:
+                raise ValueError(
+                    "The first evo.island_seeds entry must define init_program_path "
+                    "when no initial.<ext> is present."
+                )
+            language_source = Path(str(init_program_path))
+
+        if language_source is None:
+            raise ValueError("Unable to determine bootstrap language.")
+
+        language = _infer_language(language_source)
+
         evo_values = _build_default_evo_values(
             language=language,
-            init_program_path=initial_path,
+            init_program_path=(
+                initial_path if initial_path is not None else language_source
+            ),
             results_dir=results_dir,
             num_generations=args.num_generations,
         )
         evo_values.update(file_overrides["evo"])
         evo_values.update(parsed_overrides["evo"])
+        if has_island_seeds and "island_seeds" not in evo_values:
+            evo_values["island_seeds"] = island_seeds
+        elif has_island_seeds and not evo_values.get("island_seeds"):
+            evo_values["island_seeds"] = island_seeds
         evo_values["results_dir"] = str(results_dir)
         evo_values["num_generations"] = args.num_generations
 
@@ -459,7 +545,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         db_config = DatabaseConfig(**db_values)
         job_config = LocalJobConfig(**job_values)
 
-        init_program_str = initial_path.read_text(encoding="utf-8")
+        init_program_str = (
+            initial_path.read_text(encoding="utf-8")
+            if initial_path is not None
+            else None
+        )
         evaluate_str = evaluate_path.read_text(encoding="utf-8")
 
         runner = _build_runner(

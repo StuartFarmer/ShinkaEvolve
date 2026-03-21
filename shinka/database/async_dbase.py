@@ -100,7 +100,19 @@ class AsyncProgramDatabase:
             embedding_recompute_interval: Programs to add before recomputing
             enable_deadlock_debugging: Enable detailed deadlock monitoring and logging
         """
-        self.sync_db = sync_db
+        self.config = sync_db.config
+        self.embedding_model = sync_db.embedding_model
+        self.ensure_embedding_client = sync_db._ensure_embedding_client
+        self.update_last_iteration = lambda value: setattr(
+            sync_db,
+            "last_iteration",
+            max(getattr(sync_db, "last_iteration", 0), value),
+        )
+        self.update_beam_search_parent = lambda parent_id: setattr(
+            sync_db,
+            "beam_search_parent_id",
+            parent_id,
+        )
         # Use multiple workers for better concurrency with proper coordination
         if max_workers < 1:
             max_workers = 1
@@ -142,6 +154,13 @@ class AsyncProgramDatabase:
         """Helper to conditionally end debug tracking."""
         if self.enable_deadlock_debugging and op_id is not None:
             db_debugger.track_end(op_id, success=success)
+
+    def _open_repository(self, *, read_only: bool) -> ProgramRepository:
+        return ProgramRepository.from_config(
+            self.config,
+            embedding_model=self.embedding_model,
+            read_only=read_only,
+        )
 
     async def _deadlock_monitor(self):
         """Background task to monitor for deadlocks."""
@@ -194,10 +213,7 @@ class AsyncProgramDatabase:
                     try:
                         from shinka.core.context_sampler import ContextSampler
 
-                        repo = ProgramRepository.from_config(
-                            self.sync_db.config,
-                            read_only=True,
-                        )
+                        repo = self._open_repository(read_only=True)
                         sampler = ContextSampler(repo)
                         sampled = sampler.sample(
                             target_generation=target_generation,
@@ -266,10 +282,7 @@ class AsyncProgramDatabase:
                     try:
                         from shinka.core.context_sampler import ContextSampler
 
-                        repo = ProgramRepository.from_config(
-                            self.sync_db.config,
-                            read_only=True,
-                        )
+                        repo = self._open_repository(read_only=True)
                         sampler = ContextSampler(repo)
                         sampled = sampler.sample(
                             target_generation=target_generation,
@@ -325,14 +338,9 @@ class AsyncProgramDatabase:
                 def update_thread_safe():
                     repo = None
                     try:
-                        repo = ProgramRepository.from_config(
-                            self.sync_db.config,
-                            embedding_model=self.sync_db.embedding_model,
-                            read_only=False,
-                        )
+                        repo = self._open_repository(read_only=False)
                         repo.set_metadata("beam_search_parent_id", parent_id)
-                        # Also update the in-memory state on sync_db for consistency
-                        self.sync_db.beam_search_parent_id = parent_id
+                        self.update_beam_search_parent(parent_id)
                     finally:
                         if repo:
                             try:
@@ -539,15 +547,15 @@ class AsyncProgramDatabase:
         bundle: RepositoryBundle,
     ) -> ProgramWriteService:
         island_manager = CombinedIslandManager(
-            num_islands=self.sync_db.config.num_islands,
-            migration_interval=self.sync_db.config.migration_interval,
-            migration_rate=self.sync_db.config.migration_rate,
-            island_elitism=self.sync_db.config.island_elitism,
-            island_spawn_strategy=self.sync_db.config.island_spawn_strategy,
-            island_spawn_subtree_size=self.sync_db.config.island_spawn_subtree_size,
+            num_islands=self.config.num_islands,
+            migration_interval=self.config.migration_interval,
+            migration_rate=self.config.migration_rate,
+            island_elitism=self.config.island_elitism,
+            island_spawn_strategy=self.config.island_spawn_strategy,
+            island_spawn_subtree_size=self.config.island_spawn_subtree_size,
             program_repository=bundle.programs,
             island_repository=bundle.islands,
-            archive_policy=create_archive_policy(self.sync_db.config),
+            archive_policy=create_archive_policy(self.config),
         )
 
         def update_best_metadata(program: Program) -> None:
@@ -568,9 +576,9 @@ class AsyncProgramDatabase:
                 bundle.programs.set_metadata("best_score_ever", str(score))
 
         def maybe_spawn_island(current_generation: int) -> bool:
-            if not self.sync_db.config.enable_dynamic_islands:
+            if not self.config.enable_dynamic_islands:
                 return False
-            threshold = self.sync_db.config.stagnation_threshold
+            threshold = self.config.stagnation_threshold
             best_gen_raw = bundle.programs.get_metadata("best_score_generation", "0")
             best_generation = int(best_gen_raw or 0)
             if current_generation - best_generation < threshold:
@@ -599,7 +607,7 @@ class AsyncProgramDatabase:
     ) -> EmbeddingFeatureService:
         return EmbeddingFeatureService(
             bundle.programs,
-            embedding_client_factory=self.sync_db._ensure_embedding_client,
+            embedding_client_factory=self.ensure_embedding_client,
             read_only=False,
         )
 
@@ -610,7 +618,7 @@ class AsyncProgramDatabase:
             bundle = None
             try:
                 bundle = RepositoryBundle.open(
-                    self.sync_db.config,
+                    self.config,
                     read_only=False,
                 )
                 write_service = self._build_thread_write_service(bundle)
@@ -619,10 +627,7 @@ class AsyncProgramDatabase:
                     verbose=False,
                     current_last_iteration=bundle.programs.last_iteration,
                 )
-                self.sync_db.last_iteration = max(
-                    getattr(self.sync_db, "last_iteration", 0),
-                    result.last_iteration,
-                )
+                self.update_last_iteration(result.last_iteration)
             except Exception as e:
                 logger.error(f"Error in add_program_sync: {e}")
                 raise
@@ -680,7 +685,7 @@ class AsyncProgramDatabase:
         bundle = None
         try:
             bundle = RepositoryBundle.open(
-                self.sync_db.config,
+                self.config,
                 read_only=False,
             )
             service = self._build_thread_embedding_service(bundle)
@@ -706,7 +711,8 @@ class AsyncProgramDatabase:
                 thread_op_id = self._debug_track_start("get_thread_safe")
                 try:
                     thread_db = ProgramRepository.from_config(
-                        self.sync_db.config,
+                        self.config,
+                        embedding_model=self.embedding_model,
                         read_only=True,
                     )
                     try:
@@ -740,7 +746,8 @@ class AsyncProgramDatabase:
                 thread_op_id = self._debug_track_start("get_best_thread_safe")
                 try:
                     thread_db = ProgramRepository.from_config(
-                        self.sync_db.config,
+                        self.config,
+                        embedding_model=self.embedding_model,
                         read_only=True,
                     )
                     try:
@@ -874,7 +881,7 @@ class AsyncProgramDatabase:
         try:
             loop = asyncio.get_event_loop()
             def get_by_generation_thread_safe():
-                repo = ProgramRepository.from_config(self.sync_db.config, read_only=True)
+                repo = self._open_repository(read_only=True)
                 try:
                     return repo.list_by_generation(generation)
                 finally:
@@ -903,7 +910,7 @@ class AsyncProgramDatabase:
                 thread_db = None
                 try:
                     thread_db = ProgramRepository.from_config(
-                        self.sync_db.config,
+                        self.config,
                         read_only=True,
                     )
                     return thread_db.get_count_snapshot().count
@@ -936,7 +943,7 @@ class AsyncProgramDatabase:
         try:
             loop = asyncio.get_event_loop()
             def get_top_programs_thread_safe():
-                repo = ProgramRepository.from_config(self.sync_db.config, read_only=True)
+                repo = self._open_repository(read_only=True)
                 try:
                     return repo.list_top(n=n, correct_only=correct_only)
                 finally:
@@ -979,10 +986,7 @@ class AsyncProgramDatabase:
                 """Thread-safe percentile computation."""
                 repo = None
                 try:
-                    repo = ProgramRepository.from_config(
-                        self.sync_db.config,
-                        read_only=True,
-                    )
+                    repo = self._open_repository(read_only=True)
                     programs = repo.list_correct() if correct_only else repo.list_all()
                     all_scores = [
                         p.combined_score
@@ -1017,8 +1021,3 @@ class AsyncProgramDatabase:
             self._debug_track_end(op_id, success=False)
             logger.error(f"Error in compute_percentile_async: {e}")
             return 0.5  # Return neutral percentile on error
-
-    # Delegate other methods to sync database
-    def __getattr__(self, name):
-        """Delegate unknown methods to sync database."""
-        return getattr(self.sync_db, name)

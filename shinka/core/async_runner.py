@@ -322,6 +322,7 @@ class ShinkaEvolveRunner:
         self.db = None
         self.async_db = None
         self.context_sampler = None
+        self.initial_program_count_adjustment = 0
 
         # LLM clients
         self.llm = AsyncLLMClient(
@@ -609,47 +610,25 @@ class ShinkaEvolveRunner:
         """Calculate total API costs from all programs and prompt evolution."""
 
         def _compute_costs_thread_safe():
-            """Thread-safe computation of total costs from database."""
-            import sqlite3
-            import json
-
-            conn = None
+            """Thread-safe computation of total costs from persisted programs."""
+            repo = None
             try:
-                conn = sqlite3.connect(
-                    self.db.config.db_path, check_same_thread=False, timeout=60.0
+                repo = ProgramRepository.from_config(
+                    self.db_config,
+                    read_only=True,
                 )
-                cursor = conn.cursor()
-
-                # Get all metadata fields
-                cursor.execute(
-                    "SELECT metadata FROM programs WHERE metadata IS NOT NULL"
-                )
-                rows = cursor.fetchall()
-
                 total_costs = 0.0
-                for row in rows:
-                    metadata_str = row[0]
-                    if metadata_str:
-                        try:
-                            metadata = json.loads(metadata_str)
-                            # Sum up all cost-related fields (handle None values)
-                            api_cost = metadata.get("api_costs")
-                            total_costs += api_cost if api_cost is not None else 0.0
-                            embed_cost = metadata.get("embed_cost")
-                            total_costs += embed_cost if embed_cost is not None else 0.0
-                            novelty_cost = metadata.get("novelty_cost")
-                            total_costs += (
-                                novelty_cost if novelty_cost is not None else 0.0
-                            )
-                            meta_cost = metadata.get("meta_cost")
-                            total_costs += meta_cost if meta_cost is not None else 0.0
-                        except json.JSONDecodeError:
-                            continue
+                for program in repo.list_all():
+                    metadata = program.metadata or {}
+                    total_costs += float(metadata.get("api_costs", 0.0) or 0.0)
+                    total_costs += float(metadata.get("embed_cost", 0.0) or 0.0)
+                    total_costs += float(metadata.get("novelty_cost", 0.0) or 0.0)
+                    total_costs += float(metadata.get("meta_cost", 0.0) or 0.0)
 
                 return total_costs
             finally:
-                if conn:
-                    conn.close()
+                if repo:
+                    repo.close()
 
         # Call thread-safe method through executor
         loop = asyncio.get_event_loop()
@@ -808,7 +787,7 @@ class ShinkaEvolveRunner:
                                 self.meta_summarizer.perform_final_summary_async(
                                     str(self.results_dir),
                                     best_program,
-                                    self.db.config,
+                                    self.db_config,
                                 ),
                                 timeout=600.0,  # 10 minute timeout for final meta summary
                             )
@@ -873,6 +852,9 @@ class ShinkaEvolveRunner:
         )
         if hasattr(self.db, "set_display_console"):
             self.db.set_display_console(self.console)
+        self.initial_program_count_adjustment = getattr(
+            self.db, "initial_program_count_adjustment", 0
+        )
         self.async_db = AsyncProgramDatabase(
             self.db,
             max_workers=self.max_db_workers,
@@ -1247,18 +1229,14 @@ class ShinkaEvolveRunner:
         """Persist metadata updates for a stored initial program."""
 
         def update_metadata():
-            from shinka.database import ProgramDatabase
-
-            thread_db = ProgramDatabase(self.db.config)
+            repo = ProgramRepository.from_config(self.db_config, read_only=False)
             try:
-                metadata_json = json.dumps(initial_program.metadata or {})
-                thread_db.cursor.execute(
-                    "UPDATE programs SET metadata = ? WHERE id = ?",
-                    (metadata_json, initial_program.id),
+                repo.update_program_metadata(
+                    initial_program.id,
+                    initial_program.metadata or {},
                 )
-                thread_db.conn.commit()
             finally:
-                thread_db.close()
+                repo.close()
 
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, update_metadata)
@@ -1319,8 +1297,11 @@ class ShinkaEvolveRunner:
             )
             self.llm_selection.set_baseline_score(baseline_score)
 
+        self.initial_program_count_adjustment = max(len(initial_programs) - 1, 0)
         if self.db:
-            self.db.set_initial_program_count_adjustment(len(initial_programs) - 1)
+            self.db.set_initial_program_count_adjustment(
+                self.initial_program_count_adjustment
+            )
 
         self.completed_generations = 1
         self._record_progress()
@@ -3454,23 +3435,17 @@ class ShinkaEvolveRunner:
 
                                 # Update the program in the database
                                 def update_metadata():
-                                    from shinka.database import (
-                                        ProgramDatabase,
+                                    repo = ProgramRepository.from_config(
+                                        self.db_config,
+                                        read_only=False,
                                     )
-
-                                    thread_db = ProgramDatabase(self.db.config)
                                     try:
-                                        metadata_json = json.dumps(program.metadata)
-                                        thread_db.cursor.execute(
-                                            (
-                                                "UPDATE programs SET "
-                                                "metadata = ? WHERE id = ?"
-                                            ),
-                                            (metadata_json, program.id),
+                                        repo.update_program_metadata(
+                                            program.id,
+                                            program.metadata,
                                         )
-                                        thread_db.conn.commit()
                                     finally:
-                                        thread_db.close()
+                                        repo.close()
 
                                 loop = asyncio.get_event_loop()
                                 await loop.run_in_executor(None, update_metadata)
@@ -3610,9 +3585,7 @@ class ShinkaEvolveRunner:
             # Get total number of programs in database (much faster single query)
             total_programs = await self.async_db.get_total_program_count_async()
 
-            initial_program_adjustment = getattr(
-                self.db, "initial_program_count_adjustment", 0
-            )
+            initial_program_adjustment = self.initial_program_count_adjustment
             if initial_program_adjustment > 0:
                 total_programs -= initial_program_adjustment
 

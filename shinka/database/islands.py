@@ -11,6 +11,7 @@ import rich.box  # type: ignore
 import rich  # type: ignore
 from rich.console import Console as RichConsole  # type: ignore
 from rich.table import Table as RichTable  # type: ignore
+from .island_repository import IslandRepository
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,8 @@ class IslandStrategy(ABC):
         self.cursor = cursor
         self.conn = conn
         self.config = config
+        self.repository = IslandRepository(conn=conn, cursor=cursor, config=config)
+        self.repository = IslandRepository(conn=conn, cursor=cursor, config=config)
 
     @abstractmethod
     def assign_island(self, program: Any) -> None:
@@ -34,34 +37,15 @@ class IslandStrategy(ABC):
         pass
 
     def get_initialized_islands(self) -> List[int]:
-        """Get list of islands that have correct programs.
-        Default implementation for base class."""
-        self.cursor.execute(
-            """SELECT DISTINCT island_idx FROM programs
-                WHERE correct = 1 AND island_idx IS NOT NULL"""
-        )
-        islands_with_correct = {
-            row["island_idx"]
-            for row in self.cursor.fetchall()
-            if row["island_idx"] is not None
-        }
-        return list(islands_with_correct)
+        """Get list of islands that have correct programs."""
+        return self.repository.list_initialized_islands()
 
 
 class DefaultIslandAssignmentStrategy(IslandStrategy):
     """Default strategy for assigning programs to islands."""
 
     def get_initialized_islands(self) -> List[int]:
-        self.cursor.execute(
-            """SELECT DISTINCT island_idx FROM programs
-                WHERE correct = 1 AND island_idx IS NOT NULL"""
-        )
-        islands_with_correct = {
-            row["island_idx"]
-            for row in self.cursor.fetchall()
-            if row["island_idx"] is not None
-        }
-        return list(islands_with_correct)
+        return self.repository.list_initialized_islands()
 
     def assign_island(self, program: Any) -> None:
         """
@@ -97,12 +81,9 @@ class DefaultIslandAssignmentStrategy(IslandStrategy):
 
         # If the program has a parent, it inherits the parent's island.
         if program.parent_id:
-            self.cursor.execute(
-                "SELECT island_idx FROM programs WHERE id = ?", (program.parent_id,)
-            )
-            row = self.cursor.fetchone()
-            if row and row["island_idx"] is not None:
-                program.island_idx = row["island_idx"]
+            parent_island = self.repository.get_program_island(program.parent_id)
+            if parent_island is not None:
+                program.island_idx = parent_island
                 logger.debug(
                     f"Assigned program {program.id} to parent's island "
                     f"{program.island_idx}"
@@ -121,16 +102,7 @@ class CopyInitialProgramIslandStrategy(IslandStrategy):
     """Strategy that copies the initial program to each island."""
 
     def get_initialized_islands(self) -> List[int]:
-        self.cursor.execute(
-            """SELECT DISTINCT island_idx FROM programs
-                WHERE correct = 1 AND island_idx IS NOT NULL"""
-        )
-        islands_with_correct = {
-            row["island_idx"]
-            for row in self.cursor.fetchall()
-            if row["island_idx"] is not None
-        }
-        return list(islands_with_correct)
+        return self.repository.list_initialized_islands()
 
     def assign_island(self, program: Any) -> None:
         """
@@ -153,8 +125,7 @@ class CopyInitialProgramIslandStrategy(IslandStrategy):
             return
 
         # Check if this is the very first program in the database
-        self.cursor.execute("SELECT COUNT(*) FROM programs")
-        program_count = (self.cursor.fetchone() or [0])[0]
+        program_count = self.repository.get_program_count()
         if program_count == 0:
             # This is the first program - assign to island 0
             program.island_idx = 0
@@ -171,12 +142,9 @@ class CopyInitialProgramIslandStrategy(IslandStrategy):
 
         # If the program has a parent, it inherits the parent's island.
         if program.parent_id:
-            self.cursor.execute(
-                "SELECT island_idx FROM programs WHERE id = ?", (program.parent_id,)
-            )
-            row = self.cursor.fetchone()
-            if row and row["island_idx"] is not None:
-                program.island_idx = row["island_idx"]
+            parent_island = self.repository.get_program_island(program.parent_id)
+            if parent_island is not None:
+                program.island_idx = parent_island
                 logger.debug(
                     f"Assigned program {program.id} to parent's island "
                     f"{program.island_idx}"
@@ -541,11 +509,7 @@ class CombinedIslandManager:
 
     def get_island_idx(self, program_id: str) -> Optional[int]:
         """Get the island index for a given program ID."""
-        self.cursor.execute(
-            "SELECT island_idx FROM programs WHERE id = ?", (program_id,)
-        )
-        row = self.cursor.fetchone()
-        return row["island_idx"] if row else None
+        return self.repository.get_program_island(program_id)
 
     def get_initialized_islands(self) -> List[int]:
         """Get list of islands that have correct programs."""
@@ -553,11 +517,7 @@ class CombinedIslandManager:
 
     def are_all_islands_initialized(self) -> bool:
         """Check if all islands have at least one correct program."""
-        num_islands = getattr(self.config, "num_islands", 0)
-        if num_islands <= 0:
-            return True
-        initialized_islands = self.get_initialized_islands()
-        return len(initialized_islands) >= num_islands
+        return self.repository.are_all_islands_initialized()
 
     def should_schedule_migration(self, program: Any) -> bool:
         """Check if migration should be scheduled based on program
@@ -571,17 +531,7 @@ class CombinedIslandManager:
 
     def get_island_populations(self) -> Dict[int, int]:
         """Get the population count for each island."""
-        if not hasattr(self.config, "num_islands") or self.config.num_islands <= 0:
-            return {}
-
-        self.cursor.execute(
-            "SELECT island_idx, COUNT(id) as count FROM programs GROUP BY island_idx"
-        )
-        return {
-            row["island_idx"]: row["count"]
-            for row in self.cursor.fetchall()
-            if row["island_idx"] is not None
-        }
+        return self.repository.get_island_populations()
 
     def get_migration_info(self) -> Optional[str]:
         """Get migration policy information as a formatted string."""
@@ -716,13 +666,7 @@ class CombinedIslandManager:
         Returns:
             Dictionary with program data or None if not found
         """
-        self.cursor.execute(
-            """SELECT * FROM programs
-               WHERE generation = 0 AND parent_id IS NULL
-               ORDER BY timestamp ASC LIMIT 1"""
-        )
-        row = self.cursor.fetchone()
-        return dict(row) if row else None
+        return self.repository.get_initial_program_row()
 
     def get_best_program(self) -> Optional[Dict]:
         """Get the best program by combined_score.
@@ -730,13 +674,7 @@ class CombinedIslandManager:
         Returns:
             Dictionary with program data or None if not found
         """
-        self.cursor.execute(
-            """SELECT * FROM programs
-               WHERE correct = 1
-               ORDER BY combined_score DESC LIMIT 1"""
-        )
-        row = self.cursor.fetchone()
-        return dict(row) if row else None
+        return self.repository.get_best_program_row()
 
     def get_random_archive_program(self) -> Optional[Dict]:
         """Get a random program from the archive.
@@ -766,16 +704,7 @@ class CombinedIslandManager:
         Returns:
             The next island index (max existing + 1, or num_islands if no spawned islands)
         """
-        # Get the maximum island index currently in use
-        self.cursor.execute("SELECT MAX(island_idx) as max_idx FROM programs")
-        row = self.cursor.fetchone()
-        max_idx = row["max_idx"] if row and row["max_idx"] is not None else -1
-
-        # Get configured num_islands
-        num_islands = getattr(self.config, "num_islands", 1)
-
-        # Next index is max of (max existing + 1) or num_islands
-        return max(max_idx + 1, num_islands)
+        return self.repository.get_next_island_index()
 
     def _get_spawn_source_program(self, strategy: str) -> Optional[Dict]:
         """Get the source program for spawning based on strategy.

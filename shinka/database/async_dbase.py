@@ -303,26 +303,20 @@ class AsyncProgramDatabase:
                 await asyncio.sleep(0)
 
                 def update_thread_safe():
-                    # Create a new writable database instance for this thread
-                    # (SQLite connections aren't thread-safe)
-                    from .dbase import ProgramDatabase
-
-                    thread_db = None
+                    repo = None
                     try:
-                        thread_db = ProgramDatabase(
+                        repo = ProgramRepository.from_config(
                             self.sync_db.config,
                             embedding_model=self.sync_db.embedding_model,
+                            read_only=False,
                         )
-                        thread_db.beam_search_parent_id = parent_id
-                        thread_db._update_metadata_in_db(
-                            "beam_search_parent_id", parent_id
-                        )
+                        repo.set_metadata("beam_search_parent_id", parent_id)
                         # Also update the in-memory state on sync_db for consistency
                         self.sync_db.beam_search_parent_id = parent_id
                     finally:
-                        if thread_db:
+                        if repo:
                             try:
-                                thread_db.close()
+                                repo.close()
                             except Exception:
                                 pass
 

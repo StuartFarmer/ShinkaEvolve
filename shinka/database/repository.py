@@ -31,6 +31,7 @@ import numpy as np
 
 from .complexity import analyze_code_metrics
 from .dbase import DatabaseConfig, Program
+from .metadata_repository import MetadataRepository
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,7 @@ class ProgramRepository:
 
         self.last_iteration: int = 0
         self.best_program_id: str | None = None
+        self.metadata_repo: MetadataRepository | None = None
 
         self._connect()
         self._ensure_schema()
@@ -127,6 +129,11 @@ class ProgramRepository:
 
         self.conn.row_factory = sqlite3.Row
         self.cursor = self.conn.cursor()
+        self.metadata_repo = MetadataRepository(
+            conn=self.conn,
+            cursor=self.cursor,
+            read_only=self.read_only,
+        )
 
     def _ensure_schema(self) -> None:
         if not self.cursor or not self.conn:
@@ -195,14 +202,9 @@ class ProgramRepository:
             """
         )
 
-        self.cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS metadata_store (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            )
-            """
-        )
+        if self.metadata_repo is None:
+            raise ConnectionError("Repository metadata store not initialized.")
+        self.metadata_repo.ensure_schema()
 
         self.conn.commit()
         self._run_migrations()
@@ -223,51 +225,22 @@ class ProgramRepository:
         self.conn.commit()
 
     def _load_metadata(self) -> None:
-        if not self.cursor:
-            raise ConnectionError("Repository cursor not available.")
-
-        self.cursor.execute(
-            "SELECT value FROM metadata_store WHERE key = 'last_iteration'"
-        )
-        row = self.cursor.fetchone()
-        self.last_iteration = int(row["value"]) if row and row["value"] is not None else 0
-        if not row and not self.read_only:
-            self._update_metadata("last_iteration", str(self.last_iteration))
-
-        self.cursor.execute(
-            "SELECT value FROM metadata_store WHERE key = 'best_program_id'"
-        )
-        row = self.cursor.fetchone()
-        self.best_program_id = (
-            str(row["value"])
-            if row and row["value"] is not None and row["value"] != "None"
-            else None
-        )
-        if (not row or row["value"] in [None, "None"]) and not self.read_only:
-            self._update_metadata("best_program_id", None)
+        if self.metadata_repo is None:
+            raise ConnectionError("Repository metadata store not initialized.")
+        snapshot = self.metadata_repo.load_snapshot()
+        self.last_iteration = snapshot.last_iteration
+        self.best_program_id = snapshot.best_program_id
 
     def _update_metadata(self, key: str, value: Optional[str]) -> None:
-        if self.read_only:
-            raise PermissionError("Cannot update metadata in read-only mode.")
-        if not self.cursor or not self.conn:
-            raise ConnectionError("Repository not connected.")
-
-        self.cursor.execute(
-            "INSERT OR REPLACE INTO metadata_store (key, value) VALUES (?, ?)",
-            (key, value),
-        )
-        self.conn.commit()
+        if self.metadata_repo is None:
+            raise ConnectionError("Repository metadata store not initialized.")
+        self.metadata_repo.set(key, value)
 
     def get_metadata(self, key: str, default: Optional[str] = None) -> Optional[str]:
         """Fetch one metadata value from the repository-local metadata store."""
-        if not self.cursor:
-            raise ConnectionError("Repository cursor not available.")
-        self.cursor.execute("SELECT value FROM metadata_store WHERE key = ?", (key,))
-        row = self.cursor.fetchone()
-        if not row:
-            return default
-        value = row["value"]
-        return default if value is None else str(value)
+        if self.metadata_repo is None:
+            raise ConnectionError("Repository metadata store not initialized.")
+        return self.metadata_repo.get(key, default)
 
     def set_metadata(self, key: str, value: Optional[str]) -> None:
         """Persist one metadata value."""

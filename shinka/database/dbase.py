@@ -12,6 +12,8 @@ import math
 from .complexity import analyze_code_metrics
 from .islands import CombinedIslandManager
 from .island_sampler import create_island_sampler, IslandSampler
+from .island_repository import IslandRepository
+from .metadata_repository import MetadataRepository
 from .display import DatabaseDisplay
 from shinka.embed import EmbeddingClient
 from shinka.defaults import default_archive_criteria
@@ -308,6 +310,8 @@ class ProgramDatabase:
         # database-only operations and tests that do not compute embeddings.
         self.embedding_client: Optional[EmbeddingClient] = None
         self._embedding_client_init_failed = False
+        self.metadata_repo: Optional[MetadataRepository] = None
+        self.island_repo: Optional[IslandRepository] = None
 
         self.last_iteration: int = 0
         self.best_program_id: Optional[str] = None
@@ -367,6 +371,16 @@ class ProgramDatabase:
 
         self.conn.row_factory = sqlite3.Row
         self.cursor = self.conn.cursor()
+        self.metadata_repo = MetadataRepository(
+            conn=self.conn,
+            cursor=self.cursor,
+            read_only=self.read_only,
+        )
+        self.island_repo = IslandRepository(
+            conn=self.conn,
+            cursor=self.cursor,
+            config=self.config,
+        )
         if not self.read_only:
             self._create_tables()
         self._load_metadata_from_db()
@@ -497,13 +511,9 @@ class ProgramDatabase:
             """
         )
 
-        self.cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS metadata_store (
-                key TEXT PRIMARY KEY, value TEXT
-            )
-            """
-        )
+        if self.metadata_repo is None:
+            raise ConnectionError("Metadata repository not initialized.")
+        self.metadata_repo.ensure_schema()
 
         self.conn.commit()
 
@@ -548,93 +558,22 @@ class ProgramDatabase:
 
     @db_retry()
     def _load_metadata_from_db(self):
-        if not self.cursor:
-            raise ConnectionError("DB cursor not available.")
+        if self.metadata_repo is None:
+            raise ConnectionError("Metadata repository not initialized.")
 
-        self.cursor.execute(
-            "SELECT value FROM metadata_store WHERE key = 'last_iteration'"
-        )
-        row = self.cursor.fetchone()
-        self.last_iteration = (
-            int(row["value"]) if row and row["value"] is not None else 0
-        )
-        if not row or row["value"] is not None:  # Initialize in DB if first time
-            if not self.read_only:
-                self._update_metadata_in_db("last_iteration", str(self.last_iteration))
-
-        self.cursor.execute(
-            "SELECT value FROM metadata_store WHERE key = 'best_program_id'"
-        )
-        row = self.cursor.fetchone()
-        self.best_program_id = (
-            str(row["value"])
-            if row and row["value"] is not None and row["value"] != "None"
-            else None
-        )
-        if (
-            not row or row["value"] is None or row["value"] == "None"
-        ):  # Initialize or clear if stored as 'None' string
-            if not self.read_only:
-                self._update_metadata_in_db("best_program_id", None)
-
-        self.cursor.execute(
-            "SELECT value FROM metadata_store WHERE key = 'beam_search_parent_id'"
-        )
-        row = self.cursor.fetchone()
-        self.beam_search_parent_id = (
-            str(row["value"])
-            if row and row["value"] is not None and row["value"] != "None"
-            else None
-        )
-        if not row or row["value"] is None or row["value"] == "None":
-            if not self.read_only:
-                self._update_metadata_in_db("beam_search_parent_id", None)
-
-        # Load stagnation tracking for dynamic island spawning
-        self.cursor.execute(
-            "SELECT value FROM metadata_store WHERE key = 'best_score_generation'"
-        )
-        row = self.cursor.fetchone()
-        self.best_score_generation = (
-            int(row["value"]) if row and row["value"] is not None else 0
-        )
-
-        self.cursor.execute(
-            "SELECT value FROM metadata_store WHERE key = 'best_score_ever'"
-        )
-        row = self.cursor.fetchone()
-        self.best_score_ever = (
-            float(row["value"]) if row and row["value"] is not None else None
-        )
-
-        self.cursor.execute(
-            "SELECT value FROM metadata_store WHERE key = 'initial_program_count_adjustment'"
-        )
-        row = self.cursor.fetchone()
-        if row and row["value"] is not None:
-            self.initial_program_count_adjustment = int(row["value"])
-        else:
-            self.cursor.execute(
-                """SELECT COUNT(*) FROM programs
-                   WHERE generation = 0 AND parent_id IS NULL"""
-            )
-            initial_root_count = (self.cursor.fetchone() or [0])[0]
-            self.initial_program_count_adjustment = max(initial_root_count - 1, 0)
-            if not self.read_only:
-                self._update_metadata_in_db(
-                    "initial_program_count_adjustment",
-                    str(self.initial_program_count_adjustment),
-                )
+        snapshot = self.metadata_repo.load_snapshot()
+        self.last_iteration = snapshot.last_iteration
+        self.best_program_id = snapshot.best_program_id
+        self.beam_search_parent_id = snapshot.beam_search_parent_id
+        self.best_score_generation = snapshot.best_score_generation
+        self.best_score_ever = snapshot.best_score_ever
+        self.initial_program_count_adjustment = snapshot.initial_program_count_adjustment
 
     @db_retry()
     def _update_metadata_in_db(self, key: str, value: Optional[str]):
-        if not self.cursor or not self.conn:
-            raise ConnectionError("DB not connected.")
-        self.cursor.execute(
-            "INSERT OR REPLACE INTO metadata_store (key, value) VALUES (?, ?)",
-            (key, value),  # SQLite handles None as NULL
-        )
-        self.conn.commit()
+        if self.metadata_repo is None:
+            raise ConnectionError("Metadata repository not initialized.")
+        self.metadata_repo.set(key, value)
 
     @db_retry()
     def _count_programs_in_db(self) -> int:

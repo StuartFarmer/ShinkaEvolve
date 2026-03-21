@@ -1,6 +1,8 @@
 from .dbase import ProgramDatabase, Program, DatabaseConfig
 from .async_dbase import AsyncProgramDatabase
 from .repository import ProgramRepository, ProgramCountSnapshot
+from .metadata_repository import MetadataRepository, RunMetadataSnapshot
+from .island_repository import IslandRepository
 from .archive_policy import ArchivePolicy, FitnessArchivePolicy, CrowdingArchivePolicy, create_archive_policy
 from .prompt_dbase import (
     SystemPromptDatabase,
@@ -16,6 +18,9 @@ __all__ = [
     "AsyncProgramDatabase",
     "ProgramRepository",
     "ProgramCountSnapshot",
+    "MetadataRepository",
+    "RunMetadataSnapshot",
+    "IslandRepository",
     "ArchivePolicy",
     "FitnessArchivePolicy",
     "CrowdingArchivePolicy",

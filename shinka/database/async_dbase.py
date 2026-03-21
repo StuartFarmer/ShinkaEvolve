@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from .complexity import analyze_code_metrics
 from .dbase import Program, ProgramDatabase
+from .repository import ProgramRepository
 
 logger = logging.getLogger(__name__)
 
@@ -627,9 +628,10 @@ class AsyncProgramDatabase:
             def get_thread_safe():
                 thread_op_id = self._debug_track_start("get_thread_safe")
                 try:
-                    from .dbase import ProgramDatabase
-
-                    thread_db = ProgramDatabase(self.sync_db.config, read_only=True)
+                    thread_db = ProgramRepository.from_config(
+                        self.sync_db.config,
+                        read_only=True,
+                    )
                     try:
                         result = thread_db.get(program_id)
                         self._debug_track_end(thread_op_id, success=True)
@@ -660,11 +662,12 @@ class AsyncProgramDatabase:
             def get_best_thread_safe():
                 thread_op_id = self._debug_track_start("get_best_thread_safe")
                 try:
-                    from .dbase import ProgramDatabase
-
-                    thread_db = ProgramDatabase(self.sync_db.config, read_only=True)
+                    thread_db = ProgramRepository.from_config(
+                        self.sync_db.config,
+                        read_only=True,
+                    )
                     try:
-                        result = thread_db.get_best_program()
+                        result = thread_db.get_best()
                         self._debug_track_end(thread_op_id, success=True)
                         return result
                     finally:
@@ -793,10 +796,16 @@ class AsyncProgramDatabase:
 
         try:
             loop = asyncio.get_event_loop()
+            def get_by_generation_thread_safe():
+                repo = ProgramRepository.from_config(self.sync_db.config, read_only=True)
+                try:
+                    return repo.list_by_generation(generation)
+                finally:
+                    repo.close()
+
             result = await loop.run_in_executor(
                 self.executor,
-                self.sync_db.get_programs_by_generation_thread_safe,
-                generation,
+                get_by_generation_thread_safe,
             )
             self._debug_track_end(op_id, success=True)
             return result
@@ -816,12 +825,11 @@ class AsyncProgramDatabase:
                 """Thread-safe program counting."""
                 thread_db = None
                 try:
-                    from .dbase import ProgramDatabase
-
-                    thread_db = ProgramDatabase(self.sync_db.config, read_only=True)
-                    thread_db.cursor.execute("SELECT COUNT(*) FROM programs")
-                    count = thread_db.cursor.fetchone()[0]
-                    return count
+                    thread_db = ProgramRepository.from_config(
+                        self.sync_db.config,
+                        read_only=True,
+                    )
+                    return thread_db.get_count_snapshot().count
                 finally:
                     if thread_db:
                         try:
@@ -850,11 +858,16 @@ class AsyncProgramDatabase:
 
         try:
             loop = asyncio.get_event_loop()
+            def get_top_programs_thread_safe():
+                repo = ProgramRepository.from_config(self.sync_db.config, read_only=True)
+                try:
+                    return repo.list_top(n=n, correct_only=correct_only)
+                finally:
+                    repo.close()
+
             result = await loop.run_in_executor(
                 self.executor,
-                self.sync_db.get_top_programs_thread_safe,
-                n,
-                correct_only,
+                get_top_programs_thread_safe,
             )
             self._debug_track_end(op_id, success=True)
             return result

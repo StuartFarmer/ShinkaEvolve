@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict
 
-from shinka.database import DatabaseConfig, Program, ProgramDatabase
+from shinka.database import DatabaseConfig, Program, ProgramDatabase, ProgramRepository
 
 
 # Allow running this file directly with `python tests/test_async_complexity_1000.py`
@@ -73,7 +73,12 @@ async def _run_single_additions_with_complexity() -> float:
                 await async_db.add_program_async(program=build_program("single", i))
             total_time = time.time() - start_time
 
-            sample_program = sync_db.get(f"single-{NUM_PROGRAMS // 2:04d}")
+            repo = ProgramRepository(
+                config=DatabaseConfig(db_path=str(db_path), num_islands=1),
+                read_only=True,
+            )
+            sample_program = repo.get(f"single-{NUM_PROGRAMS // 2:04d}")
+            repo.close()
             assert sample_program is not None
             assert sample_program.complexity > 0
             assert "code_analysis_metrics" in (sample_program.metadata or {})
@@ -116,7 +121,12 @@ async def _run_concurrent_additions_with_complexity() -> float:
             await asyncio.gather(*tasks)
             total_time = time.time() - start_time
 
-            sample_program = sync_db.get(f"conc-{(NUM_PROGRAMS * 3) // 4:04d}")
+            repo = ProgramRepository(
+                config=DatabaseConfig(db_path=str(db_path), num_islands=1),
+                read_only=True,
+            )
+            sample_program = repo.get(f"conc-{(NUM_PROGRAMS * 3) // 4:04d}")
+            repo.close()
             assert sample_program is not None
             assert sample_program.complexity > 0
             assert "code_analysis_metrics" in (sample_program.metadata or {})

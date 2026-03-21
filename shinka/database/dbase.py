@@ -2,6 +2,7 @@ import json
 import logging
 import sqlite3
 import time
+import warnings
 from dataclasses import asdict, dataclass, field
 from functools import wraps
 from pathlib import Path
@@ -9,8 +10,6 @@ import numpy as np
 from typing import Any, Dict, List, Optional, Tuple, Union
 import math
 from .complexity import analyze_code_metrics
-from .parents import CombinedParentSelector
-from .inspirations import CombinedContextSelector
 from .islands import CombinedIslandManager
 from .island_sampler import create_island_sampler, IslandSampler
 from .display import DatabaseDisplay
@@ -18,6 +17,14 @@ from shinka.embed import EmbeddingClient
 from shinka.defaults import default_archive_criteria
 
 logger = logging.getLogger(__name__)
+
+
+def _warn_repository_deprecation(method_name: str) -> None:
+    warnings.warn(
+        f"ProgramDatabase.{method_name}() is deprecated; use ProgramRepository instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
 
 
 def clean_nan_values(obj: Any) -> Any:
@@ -788,8 +795,6 @@ class ProgramDatabase:
             logger.error(f"Error adding program {program.id}: {e}")
             raise
 
-        self._update_archive(program)
-
         # Update best program tracking
         self._update_best_program(program)
 
@@ -948,14 +953,45 @@ class ProgramDatabase:
 
         return Program.from_dict(program_data)
 
-    @db_retry()
-    def get(self, program_id: str) -> Optional[Program]:
-        """Get a program by its ID with optimized JSON operations."""
+    def _get_program_internal(self, program_id: str) -> Optional[Program]:
         if not self.cursor:
             raise ConnectionError("DB not connected.")
         self.cursor.execute("SELECT * FROM programs WHERE id = ?", (program_id,))
         row = self.cursor.fetchone()
         return self._program_from_row(row)
+
+    def _get_ancestry_internal(
+        self, program_id: str, max_ancestors: int = 10
+    ) -> List[Program]:
+        if not self.cursor:
+            raise ConnectionError("DB not connected.")
+
+        ancestors: List[Program] = []
+        current_id = program_id
+
+        for _ in range(max_ancestors):
+            self.cursor.execute(
+                "SELECT parent_id FROM programs WHERE id = ?", (current_id,)
+            )
+            row = self.cursor.fetchone()
+            if not row or not row["parent_id"]:
+                break
+
+            parent_id = row["parent_id"]
+            parent = self._get_program_internal(parent_id)
+            if parent is None:
+                break
+            ancestors.append(parent)
+            current_id = parent_id
+
+        ancestors.reverse()
+        return ancestors
+
+    @db_retry()
+    def get(self, program_id: str) -> Optional[Program]:
+        """Get a program by its ID."""
+        _warn_repository_deprecation("get")
+        return self._get_program_internal(program_id)
 
     @db_retry()
     def get_ancestry(self, program_id: str, max_ancestors: int = 10) -> List[Program]:
@@ -969,31 +1005,11 @@ class ProgramDatabase:
         Returns:
             List of ancestor programs, sorted chronologically (oldest first)
         """
-        if not self.cursor:
-            raise ConnectionError("DB not connected.")
-
-        ancestors: List[Program] = []
-        current_id = program_id
-
-        # Walk up the parent chain
-        for _ in range(max_ancestors):
-            self.cursor.execute(
-                "SELECT parent_id FROM programs WHERE id = ?", (current_id,)
-            )
-            row = self.cursor.fetchone()
-            if not row or not row["parent_id"]:
-                break
-
-            parent_id = row["parent_id"]
-            parent = self.get(parent_id)
-            if parent:
-                ancestors.append(parent)
-                current_id = parent_id
-            else:
-                break
-
-        # Reverse to get chronological order (oldest ancestor first)
-        ancestors.reverse()
+        _warn_repository_deprecation("get_ancestry")
+        ancestors = self._get_ancestry_internal(
+            program_id=program_id,
+            max_ancestors=max_ancestors,
+        )
 
         if ancestors:
             logger.info(
@@ -1029,112 +1045,32 @@ class ProgramDatabase:
         If you want finer control, this method is a good place to split into
         smaller public building blocks.
         """
-        if not self.cursor:
-            raise ConnectionError("DB not connected.")
-
-        # Check if all islands are initialized
-        if not self.island_manager.are_all_islands_initialized():
-            # Get initial program (first program in database)
-            self.cursor.execute("SELECT * FROM programs ORDER BY timestamp ASC LIMIT 1")
-            row = self.cursor.fetchone()
-            if not row:
-                raise RuntimeError("No programs found in database")
-
-            parent = self._program_from_row(row)
-            if not parent:
-                raise RuntimeError("Failed to load initial program")
-
-            logger.info(
-                f"Not all islands initialized. Using initial program {parent.id} "
-                "without inspirations."
-            )
-
-            # Print sampling summary
-            self._print_sampling_summary_helper(
-                parent,
-                [],
-                [],
-                target_generation,
-                novelty_attempt,
-                max_novelty_attempts,
-                resample_attempt,
-                max_resample_attempts,
-            )
-
-            return parent, [], []
-
-        # Once islands are initialized, the parent/inspiration pipeline becomes
-        # island-scoped first, then strategy-specific within that scope.
-        initialized_islands = self.island_manager.get_initialized_islands()
-        sampled_island = self.island_sampler.sample_island(initialized_islands)
-
-        logger.debug(f"Sampling from island {sampled_island}")
-
-        # Use CombinedParentSelector with island constraint
-        # Don't pass update_metadata_func in read-only mode to avoid retry noise
-        parent_selector = CombinedParentSelector(
-            cursor=self.cursor,
-            conn=self.conn,
-            config=self.config,
-            get_program_func=self.get,
-            best_program_id=self.best_program_id,
-            beam_search_parent_id=self.beam_search_parent_id,
-            last_iteration=self.last_iteration,
-            update_metadata_func=None
-            if self.read_only
-            else self._update_metadata_in_db,
-            get_best_program_func=self.get_best_program,
+        logger.warning(
+            "ProgramDatabase.sample() is deprecated. Using repository-backed context sampling."
         )
-
-        parent = parent_selector.sample_parent(island_idx=sampled_island)
-        if not parent:
-            raise RuntimeError(f"Failed to sample parent from island {sampled_island}")
-
-        num_archive_insp = (
-            self.config.num_archive_inspirations
-            if hasattr(self.config, "num_archive_inspirations")
-            else 5
+        context = self._sample_context_via_repository(
+            target_generation=target_generation,
+            novelty_attempt=novelty_attempt,
+            max_novelty_attempts=max_novelty_attempts,
+            resample_attempt=resample_attempt,
+            max_resample_attempts=max_resample_attempts,
+            with_fix_mode=False,
         )
-        num_top_k_insp = (
-            self.config.num_top_k_inspirations
-            if hasattr(self.config, "num_top_k_inspirations")
-            else 2
-        )
-
-        # Use the combined context selector
-        context_selector = CombinedContextSelector(
-            cursor=self.cursor,
-            conn=self.conn,
-            config=self.config,
-            get_program_func=self.get,
-            best_program_id=self.best_program_id,
-            get_island_idx_func=self.island_manager.get_island_idx,
-            program_from_row_func=self._program_from_row,
-        )
-
-        archive_inspirations, top_k_inspirations = context_selector.sample_context(
-            parent, num_archive_insp, num_top_k_insp
-        )
-
-        logger.debug(
-            f"Sampled parent {parent.id} from island {sampled_island}, "
-            f"{len(archive_inspirations)} archive inspirations, "
-            f"{len(top_k_inspirations)} top-k inspirations."
-        )
-
-        # Print sampling summary
         self._print_sampling_summary_helper(
-            parent,
-            archive_inspirations,
-            top_k_inspirations,
+            context.parent,
+            context.archive_inspirations,
+            context.top_k_inspirations,
             target_generation,
             novelty_attempt,
             max_novelty_attempts,
             resample_attempt,
             max_resample_attempts,
         )
-
-        return parent, archive_inspirations, top_k_inspirations
+        return (
+            context.parent,
+            context.archive_inspirations,
+            context.top_k_inspirations,
+        )
 
     @db_retry()
     def sample_with_fix_mode(
@@ -1154,139 +1090,20 @@ class ProgramDatabase:
             where needs_fix is True if no correct programs exist and fix mode
             should be used.
         """
-        if not self.cursor:
-            raise ConnectionError("DB not connected.")
-
-        # Check if all islands are initialized
-        if not self.island_manager.are_all_islands_initialized():
-            # Check if there are any correct programs at all
-            self.cursor.execute(
-                "SELECT COUNT(*) as cnt FROM programs WHERE correct = 1"
-            )
-            correct_count = self.cursor.fetchone()["cnt"]
-
-            if correct_count > 0:
-                # There are correct programs, just not in all islands yet
-                # Use initial program (first program in database)
-                self.cursor.execute(
-                    "SELECT * FROM programs ORDER BY timestamp ASC LIMIT 1"
-                )
-                row = self.cursor.fetchone()
-                if not row:
-                    raise RuntimeError("No programs found in database")
-                parent = self._program_from_row(row)
-                if not parent:
-                    raise RuntimeError("Failed to load initial program")
-                needs_fix = not parent.correct
-                logger.info(
-                    f"Not all islands initialized. "
-                    f"Using initial program {parent.id} (needs_fix={needs_fix})."
-                )
-            else:
-                # No correct programs exist - randomly sample from incorrect
-                self.cursor.execute("SELECT * FROM programs WHERE correct = 0")
-                rows = self.cursor.fetchall()
-                if rows:
-                    selected_row = rows[np.random.randint(len(rows))]
-                    parent = self._program_from_row(selected_row)
-                    if not parent:
-                        raise RuntimeError("Failed to load sampled program")
-                    needs_fix = True
-                    logger.info(
-                        f"No correct programs. Randomly sampled incorrect program "
-                        f"{parent.id} (Gen: {parent.generation}) "
-                        f"[from {len(rows)} incorrect programs]."
-                    )
-                else:
-                    # Fallback to initial program if no incorrect programs either
-                    self.cursor.execute(
-                        "SELECT * FROM programs ORDER BY timestamp ASC LIMIT 1"
-                    )
-                    row = self.cursor.fetchone()
-                    if not row:
-                        raise RuntimeError("No programs found in database")
-                    parent = self._program_from_row(row)
-                    if not parent:
-                        raise RuntimeError("Failed to load initial program")
-                    needs_fix = not parent.correct
-                    logger.info(
-                        f"Not all islands initialized. "
-                        f"Using initial program {parent.id} (needs_fix={needs_fix})."
-                    )
-
-            # For fix mode, get ancestors as inspirations
-            if needs_fix:
-                num_ancestors = (
-                    self.config.num_archive_inspirations
-                    + self.config.num_top_k_inspirations
-                )
-                ancestor_inspirations = self.get_ancestry(
-                    parent.id, max_ancestors=num_ancestors
-                )
-                self._print_sampling_summary_helper(
-                    parent,
-                    [],
-                    [],
-                    target_generation,
-                    novelty_attempt,
-                    max_novelty_attempts,
-                    resample_attempt,
-                    max_resample_attempts,
-                    ancestor_inspirations=ancestor_inspirations,
-                    is_fix_mode=True,
-                )
-                # Return ancestors as archive_inspirations for fix mode
-                return parent, ancestor_inspirations, [], needs_fix
-            else:
-                self._print_sampling_summary_helper(
-                    parent,
-                    [],
-                    [],
-                    target_generation,
-                    novelty_attempt,
-                    max_novelty_attempts,
-                    resample_attempt,
-                    max_resample_attempts,
-                )
-                return parent, [], [], needs_fix
-
-        # All islands initialized - sample island + constrain parents
-        initialized_islands = self.island_manager.get_initialized_islands()
-        sampled_island = self.island_sampler.sample_island(initialized_islands)
-
-        logger.debug(f"Sampling from island {sampled_island}")
-
-        # Use CombinedParentSelector with island constraint
-        # Don't pass update_metadata_func in read-only mode to avoid retry noise
-        parent_selector = CombinedParentSelector(
-            cursor=self.cursor,
-            conn=self.conn,
-            config=self.config,
-            get_program_func=self.get,
-            best_program_id=self.best_program_id,
-            beam_search_parent_id=self.beam_search_parent_id,
-            last_iteration=self.last_iteration,
-            update_metadata_func=None
-            if self.read_only
-            else self._update_metadata_in_db,
-            get_best_program_func=self.get_best_program,
+        logger.warning(
+            "ProgramDatabase.sample_with_fix_mode() is deprecated. Using repository-backed context sampling."
         )
-
-        # Use the new method that returns fix mode
-        parent, needs_fix = parent_selector.sample_parent_with_fix_mode(
-            island_idx=sampled_island
+        context = self._sample_context_via_repository(
+            target_generation=target_generation,
+            novelty_attempt=novelty_attempt,
+            max_novelty_attempts=max_novelty_attempts,
+            resample_attempt=resample_attempt,
+            max_resample_attempts=max_resample_attempts,
+            with_fix_mode=True,
         )
-        if not parent:
-            raise RuntimeError(f"Failed to sample parent from island {sampled_island}")
-
-        # If in fix mode, don't sample inspirations (they'd all be incorrect too)
-        if needs_fix:
-            logger.info(
-                f"FIX MODE: Using incorrect program {parent.id} "
-                f"(Gen: {parent.generation}, Score: {parent.combined_score})"
-            )
+        if context.needs_fix:
             self._print_sampling_summary_helper(
-                parent,
+                context.parent,
                 [],
                 [],
                 target_generation,
@@ -1294,53 +1111,26 @@ class ProgramDatabase:
                 max_novelty_attempts,
                 resample_attempt,
                 max_resample_attempts,
+                ancestor_inspirations=context.archive_inspirations,
+                is_fix_mode=True,
             )
-            return parent, [], [], True
-
-        # Normal mode - sample inspirations
-        num_archive_insp = (
-            self.config.num_archive_inspirations
-            if hasattr(self.config, "num_archive_inspirations")
-            else 5
+        else:
+            self._print_sampling_summary_helper(
+                context.parent,
+                context.archive_inspirations,
+                context.top_k_inspirations,
+                target_generation,
+                novelty_attempt,
+                max_novelty_attempts,
+                resample_attempt,
+                max_resample_attempts,
+            )
+        return (
+            context.parent,
+            context.archive_inspirations,
+            context.top_k_inspirations,
+            context.needs_fix,
         )
-        num_top_k_insp = (
-            self.config.num_top_k_inspirations
-            if hasattr(self.config, "num_top_k_inspirations")
-            else 2
-        )
-
-        context_selector = CombinedContextSelector(
-            cursor=self.cursor,
-            conn=self.conn,
-            config=self.config,
-            get_program_func=self.get,
-            best_program_id=self.best_program_id,
-            get_island_idx_func=self.island_manager.get_island_idx,
-            program_from_row_func=self._program_from_row,
-        )
-
-        archive_inspirations, top_k_inspirations = context_selector.sample_context(
-            parent, num_archive_insp, num_top_k_insp
-        )
-
-        logger.debug(
-            f"Sampled parent {parent.id} from island {sampled_island}, "
-            f"{len(archive_inspirations)} archive inspirations, "
-            f"{len(top_k_inspirations)} top-k inspirations."
-        )
-
-        self._print_sampling_summary_helper(
-            parent,
-            archive_inspirations,
-            top_k_inspirations,
-            target_generation,
-            novelty_attempt,
-            max_novelty_attempts,
-            resample_attempt,
-            max_resample_attempts,
-        )
-
-        return parent, archive_inspirations, top_k_inspirations, False
 
     def _print_sampling_summary_helper(
         self,
@@ -1363,7 +1153,7 @@ class ProgramDatabase:
                 config=self.config,
                 island_manager=self.island_manager,
                 count_programs_func=self._count_programs_in_db,
-                get_best_program_func=self.get_best_program,
+                get_best_program_func=self._get_best_program_internal,
                 default_console=self.display_console,
             )
 
@@ -1381,119 +1171,78 @@ class ProgramDatabase:
             console=self.display_console,
         )
 
+    def _sample_context_via_repository(
+        self,
+        *,
+        target_generation=None,
+        novelty_attempt=None,
+        max_novelty_attempts=None,
+        resample_attempt=None,
+        max_resample_attempts=None,
+        with_fix_mode: bool,
+    ):
+        if not self.config.db_path:
+            raise RuntimeError(
+                "Repository-backed context sampling requires config.db_path."
+            )
+
+        from .repository import ProgramRepository
+        from shinka.core.context_sampler import ContextSampler
+
+        repository = ProgramRepository.from_config(
+            self.config,
+            embedding_model=self.embedding_model,
+            read_only=True,
+        )
+        try:
+            sampler = ContextSampler(repository)
+            return sampler.sample(
+                target_generation=target_generation,
+                novelty_attempt=novelty_attempt,
+                max_novelty_attempts=max_novelty_attempts,
+                resample_attempt=resample_attempt,
+                max_resample_attempts=max_resample_attempts,
+                with_fix_mode=with_fix_mode,
+            )
+        finally:
+            repository.close()
+
+    def _get_best_program_internal(self, metric: Optional[str] = None) -> Optional[Program]:
+        from .repository import ProgramRepository
+
+        repository = ProgramRepository.from_config(
+            self.config,
+            embedding_model=self.embedding_model,
+            read_only=True,
+        )
+        try:
+            best = repository.get_best(metric=metric)
+            if best is not None and self.best_program_id != best.id:
+                self.best_program_id = best.id
+            return best
+        finally:
+            repository.close()
+
     @db_retry()
     def get_best_program(self, metric: Optional[str] = None) -> Optional[Program]:
-        if not self.cursor:
-            raise ConnectionError("DB not connected.")
-
-        # Attempt to use tracked best_program_id first if no specific metric
-        if metric is None and self.best_program_id:
-            program = self.get(self.best_program_id)
-            if program and program.correct:  # Ensure best program is correct
-                return program
-            else:  # Stale ID or incorrect program
-                logger.warning(
-                    f"Tracked best_program_id '{self.best_program_id}' "
-                    "not found or incorrect. Re-evaluating."
-                )
-                if not self.read_only:
-                    self._update_metadata_in_db("best_program_id", None)
-                self.best_program_id = None
-
-        # Fetch only correct programs and sort in Python.
-        self.cursor.execute("SELECT * FROM programs WHERE correct = 1")
-        all_rows = self.cursor.fetchall()
-        if not all_rows:
-            logger.debug("No correct programs found in database.")
-            return None
-
-        programs = []
-        for row_data in all_rows:
-            p_dict = dict(row_data)
-            p_dict["public_metrics"] = (
-                json.loads(p_dict["public_metrics"])
-                if p_dict.get("public_metrics")
-                else {}
-            )
-            p_dict["private_metrics"] = (
-                json.loads(p_dict["private_metrics"])
-                if p_dict.get("private_metrics")
-                else {}
-            )
-            p_dict["metadata"] = (
-                json.loads(p_dict["metadata"]) if p_dict.get("metadata") else {}
-            )
-            programs.append(Program.from_dict(p_dict))
-
-        if not programs:
-            return None
-
-        sorted_p: List[Program] = []
-        log_key = "average metrics"
-
-        if metric:
-            progs_with_metric = [
-                p for p in programs if p.public_metrics and metric in p.public_metrics
-            ]
-            sorted_p = sorted(
-                progs_with_metric,
-                key=lambda p_item: p_item.public_metrics.get(metric, -float("inf")),
-                reverse=True,
-            )
-            log_key = f"metric '{metric}'"
-        elif any(p.combined_score is not None for p in programs):
-            progs_with_cs = [p for p in programs if p.combined_score is not None]
-            sorted_p = sorted(
-                progs_with_cs,
-                key=lambda p_item: p_item.combined_score or -float("inf"),
-                reverse=True,
-            )
-            log_key = "combined_score"
-        else:
-            progs_with_metrics = [p for p in programs if p.public_metrics]
-            sorted_p = sorted(
-                progs_with_metrics,
-                key=lambda p_item: sum(p_item.public_metrics.values())
-                / len(p_item.public_metrics)
-                if p_item.public_metrics
-                else -float("inf"),
-                reverse=True,
-            )
-
-        if not sorted_p:
-            logger.debug("No correct programs matched criteria for get_best_program.")
-            return None
-
-        best_overall = sorted_p[0]
-        logger.debug(f"Best correct program by {log_key}: {best_overall.id}")
-
-        if self.best_program_id != best_overall.id:  # Update ID if different
-            logger.info(
-                "Updating tracked best program from "
-                f"'{self.best_program_id}' to '{best_overall.id}'."
-            )
-            self.best_program_id = best_overall.id
-            if not self.read_only:
-                self._update_metadata_in_db("best_program_id", self.best_program_id)
-        return best_overall
+        _warn_repository_deprecation("get_best_program")
+        return self._get_best_program_internal(metric=metric)
 
     @db_retry()
     def get_all_programs(self) -> List[Program]:
         """Get all programs from the database."""
-        if not self.cursor:
-            raise ConnectionError("DB not connected.")
-        self.cursor.execute(
-            """
-            SELECT p.*,
-                   CASE WHEN a.program_id IS NOT NULL THEN 1 ELSE 0 END as in_archive
-            FROM programs p
-            LEFT JOIN archive a ON p.id = a.program_id
-            """
+        _warn_repository_deprecation("get_all_programs")
+        from .repository import ProgramRepository
+
+        repository = ProgramRepository.from_config(
+            self.config,
+            embedding_model=self.embedding_model,
+            read_only=True,
         )
-        rows = self.cursor.fetchall()
-        programs = [self._program_from_row(row) for row in rows]
-        # Filter out any None values that might result from row processing errors
-        return [p for p in programs if p is not None]
+        try:
+            return repository.list_all()
+        finally:
+            repository.close()
 
     @db_retry()
     def get_programs_summary(self) -> List[Dict[str, Any]]:
@@ -1502,73 +1251,18 @@ class ProgramDatabase:
         Excludes heavy fields like code, embeddings, and large metadata.
         Returns raw dicts instead of Program objects for efficiency.
         """
-        if not self.cursor:
-            raise ConnectionError("DB not connected.")
-        self.cursor.execute(
-            """
-            SELECT
-                p.id,
-                p.parent_id,
-                p.generation,
-                p.timestamp,
-                p.combined_score,
-                p.correct,
-                p.complexity,
-                p.island_idx,
-                p.children_count,
-                p.public_metrics,
-                p.private_metrics,
-                p.metadata,
-                p.embedding_pca_2d,
-                p.embedding_pca_3d,
-                p.embedding_cluster_id,
-                p.language,
-                p.top_k_inspiration_ids,
-                p.archive_inspiration_ids,
-                p.migration_history,
-                CASE WHEN a.program_id IS NOT NULL THEN 1 ELSE 0 END as in_archive
-            FROM programs p
-            LEFT JOIN archive a ON p.id = a.program_id
-            """
+        _warn_repository_deprecation("get_programs_summary")
+        from .repository import ProgramRepository
+
+        repository = ProgramRepository.from_config(
+            self.config,
+            embedding_model=self.embedding_model,
+            read_only=True,
         )
-        rows = self.cursor.fetchall()
-        summaries = []
-        for row in rows:
-            row_dict = dict(row)
-            # Parse only the lightweight JSON fields
-            for json_field in ["public_metrics", "private_metrics", "metadata"]:
-                if row_dict.get(json_field):
-                    try:
-                        row_dict[json_field] = json.loads(row_dict[json_field])
-                    except json.JSONDecodeError:
-                        row_dict[json_field] = {}
-                else:
-                    row_dict[json_field] = {}
-            # Parse PCA embeddings (small arrays)
-            for pca_field in ["embedding_pca_2d", "embedding_pca_3d"]:
-                if row_dict.get(pca_field):
-                    try:
-                        row_dict[pca_field] = json.loads(row_dict[pca_field])
-                    except json.JSONDecodeError:
-                        row_dict[pca_field] = []
-                else:
-                    row_dict[pca_field] = []
-            # Parse inspiration IDs and migration history (small arrays)
-            for list_field in [
-                "top_k_inspiration_ids",
-                "archive_inspiration_ids",
-                "migration_history",
-            ]:
-                if row_dict.get(list_field):
-                    try:
-                        row_dict[list_field] = json.loads(row_dict[list_field])
-                    except json.JSONDecodeError:
-                        row_dict[list_field] = []
-                else:
-                    row_dict[list_field] = []
-            row_dict["in_archive"] = bool(row_dict.get("in_archive", 0))
-            summaries.append(row_dict)
-        return summaries
+        try:
+            return repository.get_summaries()
+        finally:
+            repository.close()
 
     @db_retry()
     def get_program_count_and_timestamp(self) -> Dict[str, Any]:
@@ -1576,28 +1270,35 @@ class ProgramDatabase:
         Get program count and max timestamp for efficient change detection.
         Used by auto-refresh to check if data has changed without loading all programs.
         """
-        if not self.cursor:
-            raise ConnectionError("DB not connected.")
-        self.cursor.execute(
-            "SELECT COUNT(*) as count, MAX(timestamp) as max_timestamp FROM programs"
+        _warn_repository_deprecation("get_program_count_and_timestamp")
+        from .repository import ProgramRepository
+
+        repository = ProgramRepository.from_config(
+            self.config,
+            embedding_model=self.embedding_model,
+            read_only=True,
         )
-        row = self.cursor.fetchone()
-        return {
-            "count": row["count"] if row else 0,
-            "max_timestamp": row["max_timestamp"] if row else None,
-        }
+        try:
+            snapshot = repository.get_count_snapshot()
+            return {"count": snapshot.count, "max_timestamp": snapshot.max_timestamp}
+        finally:
+            repository.close()
 
     @db_retry()
     def get_programs_by_generation(self, generation: int) -> List[Program]:
         """Get all programs from a specific generation."""
-        if not self.cursor:
-            raise ConnectionError("DB not connected.")
-        self.cursor.execute(
-            "SELECT * FROM programs WHERE generation = ?", (generation,)
+        _warn_repository_deprecation("get_programs_by_generation")
+        from .repository import ProgramRepository
+
+        repository = ProgramRepository.from_config(
+            self.config,
+            embedding_model=self.embedding_model,
+            read_only=True,
         )
-        rows = self.cursor.fetchall()
-        programs = [self._program_from_row(row) for row in rows]
-        return [p for p in programs if p is not None]
+        try:
+            return repository.list_by_generation(generation)
+        finally:
+            repository.close()
 
     @db_retry()
     def get_top_programs(
@@ -1607,109 +1308,18 @@ class ProgramDatabase:
         correct_only: bool = False,
     ) -> List[Program]:
         """Get top programs, using SQL for sorting when possible."""
-        if not self.cursor:
-            raise ConnectionError("DB not connected.")
+        _warn_repository_deprecation("get_top_programs")
+        from .repository import ProgramRepository
 
-        # Add correctness filter to WHERE clause if requested
-        correctness_filter = "WHERE correct = 1" if correct_only else ""
-
-        # Try to use SQL for sorting when possible for better performance
-        if metric == "combined_score":
-            # Use SQLite's json_extract for better performance
-            base_query = """
-                SELECT * FROM programs
-                WHERE combined_score IS NOT NULL
-            """
-            if correct_only:
-                base_query += " AND correct = 1"
-            base_query += " ORDER BY combined_score DESC LIMIT ?"
-
-            self.cursor.execute(base_query, (n,))
-            all_rows = self.cursor.fetchall()
-        elif metric == "timestamp":
-            # Direct timestamp sorting
-            query = (
-                f"SELECT * FROM programs {correctness_filter} "
-                "ORDER BY timestamp DESC LIMIT ?"
-            )
-            self.cursor.execute(query, (n,))
-            all_rows = self.cursor.fetchall()
-        else:
-            # Fall back to Python sorting for complex cases
-            query = f"SELECT * FROM programs {correctness_filter}"
-            self.cursor.execute(query)
-            all_rows = self.cursor.fetchall()
-
-        if not all_rows:
-            return []
-
-        # Process results
-        programs = []
-        for row_data in all_rows:
-            p_dict = dict(row_data)
-
-            # Optimize JSON parsing
-            public_metrics_text = p_dict.get("public_metrics")
-            if public_metrics_text:
-                try:
-                    p_dict["public_metrics"] = json.loads(public_metrics_text)
-                except json.JSONDecodeError:
-                    p_dict["public_metrics"] = {}
-            else:
-                p_dict["public_metrics"] = {}
-
-            private_metrics_text = p_dict.get("private_metrics")
-            if private_metrics_text:
-                try:
-                    p_dict["private_metrics"] = json.loads(private_metrics_text)
-                except json.JSONDecodeError:
-                    p_dict["private_metrics"] = {}
-            else:
-                p_dict["private_metrics"] = {}
-
-            metadata_text = p_dict.get("metadata")
-            if metadata_text:
-                try:
-                    p_dict["metadata"] = json.loads(metadata_text)
-                except json.JSONDecodeError:
-                    p_dict["metadata"] = {}
-            else:
-                p_dict["metadata"] = {}
-
-            # Create program object
-            programs.append(Program.from_dict(p_dict))
-
-        # If we already have the sorted programs from SQL, just return them
-        if metric in ["combined_score", "timestamp"] and programs:
-            return programs[:n]
-
-        # Otherwise, sort in Python
-        if programs:
-            if metric:
-                progs_with_metric = [
-                    p
-                    for p in programs
-                    if p.public_metrics and metric in p.public_metrics
-                ]
-                sorted_p = sorted(
-                    progs_with_metric,
-                    key=lambda p_item: p_item.public_metrics.get(metric, -float("inf")),
-                    reverse=True,
-                )
-            else:  # Default: average metrics
-                progs_with_metrics = [p for p in programs if p.public_metrics]
-                sorted_p = sorted(
-                    progs_with_metrics,
-                    key=lambda p_item: sum(p_item.public_metrics.values())
-                    / len(p_item.public_metrics)
-                    if p_item.public_metrics
-                    else -float("inf"),
-                    reverse=True,
-                )
-
-            return sorted_p[:n]
-
-        return []
+        repository = ProgramRepository.from_config(
+            self.config,
+            embedding_model=self.embedding_model,
+            read_only=True,
+        )
+        try:
+            return repository.list_top(n=n, metric=metric, correct_only=correct_only)
+        finally:
+            repository.close()
 
     def save(self, path: Optional[str] = None) -> None:
         if not self.conn or not self.cursor:
@@ -1874,22 +1484,23 @@ class ProgramDatabase:
         return score
 
     def _get_archive_programs(self) -> List[Program]:
-        """Fetch all programs currently in the archive."""
-        if not self.cursor:
-            return []
-
-        self.cursor.execute(
-            "SELECT p.* FROM programs p JOIN archive a ON p.id = a.program_id"
+        """Deprecated persisted archive view. Computes archive from programs."""
+        logger.debug(
+            "ProgramDatabase._get_archive_programs() is deprecated; computing archive from persisted programs."
         )
-        rows = self.cursor.fetchall()
+        from .archive_policy import create_archive_policy
+        from .repository import ProgramRepository
 
-        programs = []
-        for row in rows:
-            prog = self._program_from_row(row)
-            if prog:
-                programs.append(prog)
-
-        return programs
+        policy = create_archive_policy(self.config)
+        repository = ProgramRepository.from_config(
+            self.config,
+            embedding_model=self.embedding_model,
+            read_only=True,
+        )
+        try:
+            return policy.compute(repository.list_all())
+        finally:
+            repository.close()
 
     def _find_most_similar_in_archive(
         self, embedding: List[float]
@@ -1904,15 +1515,11 @@ class ProgramDatabase:
         Returns:
             The most similar program, or None if no valid comparisons possible
         """
-        if not embedding or not self.cursor:
+        if not embedding:
             return None
 
-        self.cursor.execute(
-            "SELECT p.* FROM programs p JOIN archive a ON p.id = a.program_id"
-        )
-        rows = self.cursor.fetchall()
-
-        if not rows:
+        archive_programs = self._get_archive_programs()
+        if not archive_programs:
             return None
 
         best_similarity = -float("inf")
@@ -1924,8 +1531,7 @@ class ProgramDatabase:
         if embedding_norm < 1e-8:
             return None
 
-        for row in rows:
-            prog = self._program_from_row(row)
+        for prog in archive_programs:
             if not prog or not prog.embedding:
                 continue
 
@@ -2021,147 +1627,26 @@ class ProgramDatabase:
 
     @db_retry()
     def _update_archive(self, program: Program) -> None:
-        """
-        Update the archive with a new program using the configured selection strategy.
-
-        Strategies:
-            - "fitness": Replace the worst program globally (classic approach)
-            - "crowding": Replace the most similar program if better (maintains diversity)
-        """
-        if (
-            not self.cursor
-            or not self.conn
-            or not hasattr(self.config, "archive_size")
-            or self.config.archive_size <= 0
-        ):
-            logger.debug("Archive update skipped (config/DB issue or size <= 0).")
-            return
-
-        # Only add correct programs to the archive
-        if not program.correct:
-            logger.debug(f"Program {program.id} not added to archive (not correct).")
-            return
-
-        self.cursor.execute("SELECT COUNT(*) FROM archive")
-        count = (self.cursor.fetchone() or [0])[0]
-
-        if count < self.config.archive_size:
-            # Archive not full - add directly
-            self.cursor.execute(
-                "INSERT OR IGNORE INTO archive (program_id) VALUES (?)",
-                (program.id,),
-            )
-            self.conn.commit()
-            logger.debug(f"Program {program.id} added to archive (space available).")
-            return
-
-        # Archive is full - use strategy to decide replacement
-        strategy = getattr(self.config, "archive_selection_strategy", "fitness")
-
-        if strategy == "crowding":
-            self._update_archive_crowding(program)
-        else:  # "fitness" - default behavior
-            self._update_archive_fitness(program)
+        """Deprecated no-op. Archive membership is now computed on demand."""
+        logger.debug(
+            "ProgramDatabase._update_archive(%s) is deprecated; archive persistence is disabled.",
+            program.id,
+        )
+        return
 
     def _update_archive_fitness(self, program: Program) -> None:
-        """
-        Fitness-based archive update: replace the worst program globally.
-
-        Uses rank-based scoring if multiple criteria are configured.
-        """
-        # Fetch full archive programs for multi-criteria comparison
-        archive_programs = self._get_archive_programs()
-
-        if not archive_programs:
-            self.cursor.execute(
-                "INSERT OR IGNORE INTO archive (program_id) VALUES (?)",
-                (program.id,),
-            )
-            self.conn.commit()
-            return
-
-        # Find the worst program using ranked scoring
-        criteria = getattr(self.config, "archive_criteria", {"combined_score": 1.0})
-
-        if len(criteria) > 1:
-            # Multi-criteria: use ranked scoring to find worst
-            scores = [
-                (p, self._compute_archive_score_ranked(p, archive_programs))
-                for p in archive_programs
-            ]
-            worst_in_archive = min(scores, key=lambda x: x[1])[0]
-        else:
-            # Single criterion: find worst by pairwise comparison
-            worst_in_archive = archive_programs[0]
-            for p_archived in archive_programs[1:]:
-                if self._is_better(worst_in_archive, p_archived):
-                    worst_in_archive = p_archived
-
-        # Check if new program is better than the worst
-        if self._is_better(program, worst_in_archive, archive_programs):
-            self.cursor.execute(
-                "DELETE FROM archive WHERE program_id = ?",
-                (worst_in_archive.id,),
-            )
-            self.cursor.execute(
-                "INSERT INTO archive (program_id) VALUES (?)", (program.id,)
-            )
-
-            # Log with score information
-            p_score = program.combined_score or 0.0
-            w_score = worst_in_archive.combined_score or 0.0
-            logger.info(
-                f"Program {program.id} (score={p_score:.4f}) replaced "
-                f"{worst_in_archive.id} (score={w_score:.4f}) in archive [fitness]."
-            )
-
-        self.conn.commit()
+        logger.debug(
+            "ProgramDatabase._update_archive_fitness(%s) is deprecated and no longer used.",
+            program.id,
+        )
+        return
 
     def _update_archive_crowding(self, program: Program) -> None:
-        """
-        Crowding-based archive update: replace the most similar program if better.
-
-        This maintains diversity by making new programs compete with their
-        "neighbors" in solution space rather than globally worst programs.
-        Falls back to fitness-based if no embedding is available.
-        """
-        # Check if program has embedding for similarity computation
-        if not program.embedding:
-            logger.debug(
-                f"Program {program.id} has no embedding, falling back to fitness-based."
-            )
-            return self._update_archive_fitness(program)
-
-        # Find most similar program in archive
-        most_similar = self._find_most_similar_in_archive(program.embedding)
-
-        if most_similar is None:
-            logger.debug(
-                "No similar programs found in archive, falling back to fitness-based."
-            )
-            return self._update_archive_fitness(program)
-
-        # Get archive for ranked comparison
-        archive_programs = self._get_archive_programs()
-
-        # Only replace if better than the similar program (niching)
-        if self._is_better(program, most_similar, archive_programs):
-            self.cursor.execute(
-                "DELETE FROM archive WHERE program_id = ?",
-                (most_similar.id,),
-            )
-            self.cursor.execute(
-                "INSERT INTO archive (program_id) VALUES (?)", (program.id,)
-            )
-
-            p_score = program.combined_score or 0.0
-            s_score = most_similar.combined_score or 0.0
-            logger.info(
-                f"Program {program.id} (score={p_score:.4f}) replaced similar program "
-                f"{most_similar.id} (score={s_score:.4f}) in archive [crowding]."
-            )
-
-        self.conn.commit()
+        logger.debug(
+            "ProgramDatabase._update_archive_crowding(%s) is deprecated and no longer used.",
+            program.id,
+        )
+        return
 
     @db_retry()
     def _update_best_program(self, program: Program) -> None:
@@ -2172,7 +1657,7 @@ class ProgramDatabase:
 
         current_best_p = None
         if self.best_program_id:
-            current_best_p = self.get(self.best_program_id)
+            current_best_p = self._get_program_internal(self.best_program_id)
 
         if current_best_p is None or self._is_better(program, current_best_p):
             self.best_program_id = program.id
@@ -2216,7 +1701,7 @@ class ProgramDatabase:
                 config=self.config,
                 island_manager=self.island_manager,
                 count_programs_func=self._count_programs_in_db,
-                get_best_program_func=self.get_best_program,
+                get_best_program_func=self._get_best_program_internal,
                 default_console=self.display_console,
             )
             self._database_display.set_last_iteration(self.last_iteration)
@@ -2234,7 +1719,7 @@ class ProgramDatabase:
                 config=self.config,
                 island_manager=self.island_manager,
                 count_programs_func=self._count_programs_in_db,
-                get_best_program_func=self.get_best_program,
+                get_best_program_func=self._get_best_program_internal,
                 default_console=self.display_console,
             )
 
@@ -2489,7 +1974,7 @@ class ProgramDatabase:
                 continue
 
         if most_similar_id:
-            return self.get(most_similar_id)
+            return self._get_program_internal(most_similar_id)
         return None
 
     @db_retry()
@@ -2765,44 +2250,18 @@ class ProgramDatabase:
     @db_retry()
     def get_programs_by_generation_thread_safe(self, generation: int) -> List[Program]:
         """Thread-safe version of get_programs_by_generation."""
-        conn = None
+        _warn_repository_deprecation("get_programs_by_generation_thread_safe")
+        from .repository import ProgramRepository
+
+        repository = ProgramRepository.from_config(
+            self.config,
+            embedding_model=self.embedding_model,
+            read_only=True,
+        )
         try:
-            conn = sqlite3.connect(
-                self.config.db_path, check_same_thread=False, timeout=60.0
-            )
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-
-            cursor.execute("SELECT * FROM programs WHERE generation = ?", (generation,))
-            rows = cursor.fetchall()
-
-            programs = []
-            for row in rows:
-                if not row:
-                    continue
-                program_data = dict(row)
-                # Manually handle JSON deserialization for thread safety
-                for key, value in program_data.items():
-                    if key in [
-                        "public_metrics",
-                        "private_metrics",
-                        "metadata",
-                        "archive_inspiration_ids",
-                        "top_k_inspiration_ids",
-                        "embedding",
-                        "embedding_pca_2d",
-                        "embedding_pca_3d",
-                        "migration_history",
-                    ] and isinstance(value, str):
-                        try:
-                            program_data[key] = json.loads(value)
-                        except json.JSONDecodeError:
-                            program_data[key] = {} if key.endswith("_metrics") else []
-                programs.append(Program(**program_data))
-            return programs
+            return repository.list_by_generation(generation)
         finally:
-            if conn:
-                conn.close()
+            repository.close()
 
     @db_retry()
     def get_top_programs_thread_safe(
@@ -2811,70 +2270,18 @@ class ProgramDatabase:
         correct_only: bool = True,
     ) -> List[Program]:
         """Thread-safe version of get_top_programs."""
-        conn = None
+        _warn_repository_deprecation("get_top_programs_thread_safe")
+        from .repository import ProgramRepository
+
+        repository = ProgramRepository.from_config(
+            self.config,
+            embedding_model=self.embedding_model,
+            read_only=True,
+        )
         try:
-            conn = sqlite3.connect(
-                self.config.db_path, check_same_thread=False, timeout=60.0
-            )
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-
-            # Use combined_score for sorting
-            base_query = """
-                SELECT * FROM programs
-                WHERE combined_score IS NOT NULL
-            """
-            if correct_only:
-                base_query += " AND correct = 1"
-            base_query += " ORDER BY combined_score DESC LIMIT ?"
-
-            cursor.execute(base_query, (n,))
-            all_rows = cursor.fetchall()
-
-            if not all_rows:
-                return []
-
-            # Process results
-            programs = []
-            for row_data in all_rows:
-                program_data = dict(row_data)
-
-                # Manually handle JSON deserialization for thread safety
-                json_fields = [
-                    "public_metrics",
-                    "private_metrics",
-                    "metadata",
-                    "archive_inspiration_ids",
-                    "top_k_inspiration_ids",
-                    "embedding",
-                    "embedding_pca_2d",
-                    "embedding_pca_3d",
-                    "migration_history",
-                ]
-                for key, value in program_data.items():
-                    if key in json_fields and isinstance(value, str):
-                        try:
-                            program_data[key] = json.loads(value)
-                        except json.JSONDecodeError:
-                            is_dict_field = (
-                                key.endswith("_metrics") or key == "metadata"
-                            )
-                            program_data[key] = {} if is_dict_field else []
-
-                # Handle text_feedback
-                if (
-                    "text_feedback" not in program_data
-                    or program_data["text_feedback"] is None
-                ):
-                    program_data["text_feedback"] = ""
-
-                programs.append(Program.from_dict(program_data))
-
-            return programs
-
+            return repository.list_top(n=n, correct_only=correct_only)
         finally:
-            if conn:
-                conn.close()
+            repository.close()
 
     def _get_programs_for_island(self, island_idx: int) -> List[Program]:
         """

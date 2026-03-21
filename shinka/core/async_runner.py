@@ -21,7 +21,7 @@ from rich.console import Console
 from rich.table import Table
 import rich.box
 
-from shinka.database import ProgramDatabase, DatabaseConfig, Program
+from shinka.database import ProgramDatabase, DatabaseConfig, Program, ProgramRepository
 from shinka.database.async_dbase import AsyncProgramDatabase
 from shinka.database.prompt_dbase import (
     SystemPromptDatabase,
@@ -937,6 +937,13 @@ class ShinkaEvolveRunner:
                     )
                 await self._generate_initial_program()
 
+    def _list_all_programs_via_repository(self) -> list[Program]:
+        repository = ProgramRepository.from_config(self.db_config, read_only=True)
+        try:
+            return repository.list_all()
+        finally:
+            repository.close()
+
     async def _setup_prompt_evolution(self):
         """Setup prompt evolution database and components."""
         # Create prompt database path
@@ -1084,7 +1091,7 @@ class ShinkaEvolveRunner:
                 try:
                     # Get all correct program scores from main database
                     # This matches what the webUI uses for beat percentage calculation
-                    all_programs = self.db.get_all_programs()
+                    all_programs = self._list_all_programs_via_repository()
                     all_correct_scores = [
                         p.combined_score
                         for p in all_programs
@@ -3921,7 +3928,7 @@ class ShinkaEvolveRunner:
             if self.prompt_db is not None and self.db is not None:
                 try:
                     # Get all correct program scores from main database
-                    all_programs = self.db.get_all_programs()
+                    all_programs = self._list_all_programs_via_repository()
                     all_correct_scores = [
                         p.combined_score
                         for p in all_programs

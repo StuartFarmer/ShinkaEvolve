@@ -697,15 +697,6 @@ class CombinedIslandManager:
                 f"for island {island_idx}"
             )
 
-            # Add the copied program to the archive if it's correct
-            # This ensures it can be used as inspiration for that island
-            if program.correct:
-                self.cursor.execute(
-                    "INSERT OR IGNORE INTO archive (program_id) VALUES (?)",
-                    (new_id,),
-                )
-                logger.debug(f"Added copy {new_id[:8]}... to archive (correct program)")
-
         self.conn.commit()
         logger.info(
             f"Created {len(created_ids)} copies of program "
@@ -753,13 +744,21 @@ class CombinedIslandManager:
         Returns:
             Dictionary with program data or None if archive is empty
         """
-        self.cursor.execute(
-            """SELECT p.* FROM programs p
-               INNER JOIN archive a ON p.id = a.program_id
-               ORDER BY RANDOM() LIMIT 1"""
-        )
-        row = self.cursor.fetchone()
-        return dict(row) if row else None
+        from .archive_policy import create_archive_policy
+        from .repository import ProgramRepository
+
+        if not getattr(self.config, "db_path", None):
+            return None
+
+        repository = ProgramRepository.from_config(self.config, read_only=True)
+        try:
+            archive = create_archive_policy(self.config).compute(repository.list_correct())
+            if not archive:
+                return None
+            program = random.choice(archive)
+            return program.to_dict()
+        finally:
+            repository.close()
 
     def get_next_island_index(self) -> int:
         """Get the next available island index.
@@ -881,13 +880,6 @@ class CombinedIslandManager:
                 migration_history_json,
             ),
         )
-
-        # Add to archive if correct
-        if source_program.get("correct"):
-            self.cursor.execute(
-                "INSERT OR IGNORE INTO archive (program_id) VALUES (?)",
-                (new_id,),
-            )
 
         # Update parent's children_count
         if new_parent_id:

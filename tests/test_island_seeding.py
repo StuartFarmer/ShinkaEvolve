@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from shinka.core.async_runner import ShinkaEvolveRunner
-from shinka.database import DatabaseConfig, Program, ProgramDatabase
+from shinka.database import DatabaseConfig, Program, ProgramDatabase, ProgramRepository
 
 
 def test_explicit_island_assignment_is_preserved():
@@ -27,12 +27,15 @@ def test_explicit_island_assignment_is_preserved():
             metadata={"family_id": "family_two"},
         )
 
-        db.add(seeded_program)
-        stored_program = db.get("seed_program")
-
-        assert stored_program is not None
-        assert stored_program.island_idx == 2
-        assert db.get_programs_by_generation(0) == [stored_program]
+        repo = ProgramRepository(DatabaseConfig(db_path=str(db_path), num_islands=3), read_only=True)
+        try:
+            db.add(seeded_program)
+            stored_program = repo.get("seed_program")
+            assert stored_program is not None
+            assert stored_program.island_idx == 2
+            assert repo.list_by_generation(0) == [stored_program]
+        finally:
+            repo.close()
 
         db.close()
 

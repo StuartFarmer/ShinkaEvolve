@@ -2,7 +2,7 @@ import asyncio
 import tempfile
 from pathlib import Path
 
-from shinka.database import DatabaseConfig, Program, ProgramDatabase
+from shinka.database import DatabaseConfig, Program, ProgramDatabase, ProgramRepository
 from shinka.database.async_dbase import AsyncProgramDatabase
 
 
@@ -26,7 +26,12 @@ def test_program_database_init_without_openai_key(monkeypatch):
         db = ProgramDatabase(config=DatabaseConfig(db_path=str(db_path), num_islands=1))
         try:
             db.add(_program("p0"))
-            assert db.get("p0") is not None
+            repo = ProgramRepository(
+                config=DatabaseConfig(db_path=str(db_path), num_islands=1),
+                read_only=True,
+            )
+            assert repo.get("p0") is not None
+            repo.close()
         finally:
             db.close()
 
@@ -45,7 +50,12 @@ def test_async_db_add_without_openai_key_when_embeddings_disabled(monkeypatch):
             async_db = AsyncProgramDatabase(sync_db=sync_db)
             try:
                 await async_db.add_program_async(_program("async-p0"))
-                assert sync_db.get("async-p0") is not None
+                repo = ProgramRepository(
+                    config=DatabaseConfig(db_path=str(db_path), num_islands=1),
+                    read_only=True,
+                )
+                assert repo.get("async-p0") is not None
+                repo.close()
             finally:
                 await async_db.close_async()
                 sync_db.close()

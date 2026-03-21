@@ -24,7 +24,7 @@ import urllib.parse
 import webbrowser
 from typing import Optional, Dict, Any, Tuple
 
-from shinka.database import DatabaseConfig, ProgramDatabase
+from shinka.database import DatabaseConfig, ProgramRepository
 from shinka.database import SystemPromptConfig, SystemPromptDatabase
 
 # We'll use a simple text-to-PDF approach instead of complex dependencies
@@ -230,7 +230,7 @@ class DatabaseRequestHandler(http.server.SimpleHTTPRequestHandler):
             db = None
             try:
                 config = DatabaseConfig(db_path=abs_db_path)
-                db = ProgramDatabase(config, read_only=True)
+                db = ProgramRepository(config, read_only=True)
 
                 # Set WAL mode compatible settings for read-only connections
                 # Longer busy_timeout for concurrent access during evolution
@@ -240,7 +240,7 @@ class DatabaseRequestHandler(http.server.SimpleHTTPRequestHandler):
                     )  # 30 second timeout
                     db.cursor.execute("PRAGMA journal_mode = WAL;")  # Ensure WAL mode
 
-                programs = db.get_all_programs()
+                programs = db.list_all()
 
                 # Convert Program objects to dicts for JSON
                 programs_dict = [p.to_dict() for p in programs]
@@ -320,13 +320,13 @@ class DatabaseRequestHandler(http.server.SimpleHTTPRequestHandler):
             db = None
             try:
                 config = DatabaseConfig(db_path=abs_db_path)
-                db = ProgramDatabase(config, read_only=True)
+                db = ProgramRepository(config, read_only=True)
 
                 if db.cursor:
                     db.cursor.execute("PRAGMA busy_timeout = 30000;")
                     db.cursor.execute("PRAGMA journal_mode = WAL;")
 
-                summaries = db.get_programs_summary()
+                summaries = db.get_summaries()
                 self.send_json_response(summaries)
                 print(
                     f"[SERVER] Successfully served {len(summaries)} "
@@ -384,12 +384,16 @@ class DatabaseRequestHandler(http.server.SimpleHTTPRequestHandler):
             db = None
             try:
                 config = DatabaseConfig(db_path=abs_db_path)
-                db = ProgramDatabase(config, read_only=True)
+                db = ProgramRepository(config, read_only=True)
 
                 if db.cursor:
                     db.cursor.execute("PRAGMA busy_timeout = 30000;")
 
-                result = db.get_program_count_and_timestamp()
+                snapshot = db.get_count_snapshot()
+                result = {
+                    "count": snapshot.count,
+                    "max_timestamp": snapshot.max_timestamp,
+                }
                 self.send_json_response(result)
                 return
 
@@ -443,7 +447,7 @@ class DatabaseRequestHandler(http.server.SimpleHTTPRequestHandler):
             db = None
             try:
                 config = DatabaseConfig(db_path=abs_db_path)
-                db = ProgramDatabase(config, read_only=True)
+                db = ProgramRepository(config, read_only=True)
 
                 if db.cursor:
                     db.cursor.execute("PRAGMA busy_timeout = 30000;")

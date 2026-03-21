@@ -24,9 +24,9 @@ from typing import List, Optional
 import numpy as np
 
 from shinka.core.search_policies import InspirationSelector, ParentSelector
-from shinka.database import Program, ProgramRepository
+from shinka.database.dbase import Program, DatabaseConfig
+from shinka.database.repository import ProgramRepository
 from shinka.database.archive_policy import ArchivePolicy, create_archive_policy
-from shinka.database.dbase import DatabaseConfig
 
 
 @dataclass(frozen=True)

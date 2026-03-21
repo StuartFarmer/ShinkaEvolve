@@ -68,7 +68,7 @@ def test_program_repository_roundtrip_and_queries(tmp_path):
     assert repo.get_best().id == child.id
     assert repo.get_best(island_idx=0).id == root.id
     assert repo.get_ancestry(child.id)[0].id == root.id
-    assert repo.list_initialized_islands() == [0, 1]
+    assert [island.island_idx for island in repo.list_initialized_islands()] == [0, 1]
     assert repo.get_island_program_counts([0, 1]) == {0: 1, 1: 1}
     assert repo.get_island_best_scores([0, 1]) == {0: 1.0, 1: 3.0}
 

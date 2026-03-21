@@ -26,6 +26,7 @@ import numpy as np
 from shinka.core.search_policies import InspirationSelector, ParentSelector
 from shinka.database.dbase import Program, DatabaseConfig
 from shinka.database.repository import ProgramRepository
+from shinka.database.island_repository import Island
 from shinka.database.archive_policy import ArchivePolicy, create_archive_policy
 
 
@@ -155,7 +156,7 @@ class ContextSampler:
         return self.archive_policy.compute(self.repository.list_correct())
 
     def _are_all_islands_initialized(self) -> bool:
-        initialized = self.repository.list_initialized_islands()
+        initialized = self.repository.list_initialized_island_ids()
         if not initialized:
             return False
         num_islands = int(getattr(self.config, "num_islands", 1))
@@ -242,38 +243,53 @@ class ContextSampler:
             max_resample_attempts=max_resample_attempts,
         )
 
-    def _sample_island(self, initialized_islands: List[int]) -> int:
+    def _sample_island(self, initialized_islands: List[Island]) -> int:
         if not initialized_islands:
             raise ValueError("No initialized islands available for sampling.")
 
         strategy = getattr(self.config, "island_selection_strategy", "uniform")
         if strategy == "uniform":
-            return random.choice(initialized_islands)
+            return random.choice(initialized_islands).island_idx
 
         if strategy == "equal":
-            counts = self.repository.get_island_program_counts(initialized_islands)
-            min_count = min(counts.values())
-            candidates = [idx for idx, count in counts.items() if count == min_count]
+            min_count = min(island.correct_programs for island in initialized_islands)
+            candidates = [
+                island.island_idx
+                for island in initialized_islands
+                if island.correct_programs == min_count
+            ]
             return random.choice(candidates)
 
         if strategy == "proportional":
-            fitness = self.repository.get_island_best_scores(initialized_islands)
-            values = np.array([fitness.get(idx, 0.0) for idx in initialized_islands], dtype=float)
+            values = np.array(
+                [island.best_score for island in initialized_islands],
+                dtype=float,
+            )
             exp_values = np.exp(values)
-            probs = exp_values / np.sum(exp_values) if float(np.sum(exp_values)) > 0 else np.ones(len(values)) / len(values)
-            return initialized_islands[int(np.random.choice(len(initialized_islands), p=probs))]
+            probs = (
+                exp_values / np.sum(exp_values)
+                if float(np.sum(exp_values)) > 0
+                else np.ones(len(values)) / len(values)
+            )
+            return initialized_islands[
+                int(np.random.choice(len(initialized_islands), p=probs))
+            ].island_idx
 
         if strategy == "weighted":
-            counts = self.repository.get_island_program_counts(initialized_islands)
-            fitness = self.repository.get_island_best_scores(initialized_islands)
             weights = []
-            for island_idx in initialized_islands:
-                count = counts.get(island_idx, 1) or 1
-                best_score = max(fitness.get(island_idx, 0.0), 0.0)
+            for island in initialized_islands:
+                count = island.correct_programs or 1
+                best_score = max(island.best_score, 0.0)
                 weights.append((best_score + 1e-6) / count)
             weights_arr = np.array(weights, dtype=float)
-            probs = weights_arr / np.sum(weights_arr) if float(np.sum(weights_arr)) > 0 else np.ones(len(weights_arr)) / len(weights_arr)
-            return initialized_islands[int(np.random.choice(len(initialized_islands), p=probs))]
+            probs = (
+                weights_arr / np.sum(weights_arr)
+                if float(np.sum(weights_arr)) > 0
+                else np.ones(len(weights_arr)) / len(weights_arr)
+            )
+            return initialized_islands[
+                int(np.random.choice(len(initialized_islands), p=probs))
+            ].island_idx
 
         raise ValueError(f"Unknown island selection strategy: {strategy}")
 

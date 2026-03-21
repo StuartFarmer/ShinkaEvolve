@@ -23,6 +23,8 @@ import json
 import logging
 import math
 import sqlite3
+import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -31,6 +33,7 @@ import numpy as np
 
 from .complexity import analyze_code_metrics
 from .dbase import DatabaseConfig, Program
+from .island_repository import IslandRepository, Island
 from .metadata_repository import MetadataRepository
 
 logger = logging.getLogger(__name__)
@@ -89,6 +92,7 @@ class ProgramRepository:
         self.last_iteration: int = 0
         self.best_program_id: str | None = None
         self.metadata_repo: MetadataRepository | None = None
+        self.island_repo: IslandRepository | None = None
 
         self._connect()
         self._ensure_schema()
@@ -106,6 +110,51 @@ class ProgramRepository:
         # existing call sites can migrate without churn.
         _ = embedding_model
         return cls(config=config, read_only=read_only)
+
+    @classmethod
+    def from_db_path(
+        cls,
+        db_path: str,
+        *,
+        num_islands: int = 0,
+        read_only: bool = False,
+    ) -> "ProgramRepository":
+        return cls(
+            config=DatabaseConfig(
+                db_path=db_path,
+                num_islands=num_islands,
+            ),
+            read_only=read_only,
+        )
+
+    @classmethod
+    def from_existing_connection(
+        cls,
+        *,
+        config: DatabaseConfig,
+        conn: sqlite3.Connection,
+        cursor: sqlite3.Cursor,
+        read_only: bool = False,
+    ) -> "ProgramRepository":
+        repo = cls.__new__(cls)
+        repo.config = config
+        repo.read_only = read_only
+        repo.conn = conn
+        repo.cursor = cursor
+        repo.last_iteration = 0
+        repo.best_program_id = None
+        repo.metadata_repo = MetadataRepository(
+            conn=conn,
+            cursor=cursor,
+            read_only=read_only,
+        )
+        repo.island_repo = IslandRepository(
+            conn=conn,
+            cursor=cursor,
+            num_islands=config.num_islands,
+        )
+        repo._load_metadata()
+        return repo
 
     def _connect(self) -> None:
         db_path_str = getattr(self.config, "db_path", None)
@@ -133,6 +182,11 @@ class ProgramRepository:
             conn=self.conn,
             cursor=self.cursor,
             read_only=self.read_only,
+        )
+        self.island_repo = IslandRepository(
+            conn=self.conn,
+            cursor=self.cursor,
+            num_islands=self.config.num_islands,
         )
 
     def _ensure_schema(self) -> None:
@@ -248,6 +302,13 @@ class ProgramRepository:
 
     def _serialize_json(self, value: Any) -> str:
         return json.dumps(_clean_nan_values(value))
+
+    def _serialize_text_feedback(self, text_feedback: Any) -> str:
+        if isinstance(text_feedback, list):
+            return "\n".join(str(item) for item in text_feedback)
+        if text_feedback is None:
+            return ""
+        return str(text_feedback)
 
     def _row_to_program(self, row: sqlite3.Row | None) -> Optional[Program]:
         if not row:
@@ -425,6 +486,315 @@ class ProgramRepository:
                 programs.append(program)
         return programs
 
+    def get_program_count(self) -> int:
+        if self.island_repo is None:
+            raise ConnectionError("Repository island view not initialized.")
+        return self.island_repo.get_program_count()
+
+    def count_by_island(self, island_idx: int) -> int:
+        if not self.cursor:
+            raise ConnectionError("Repository not connected.")
+        self.cursor.execute(
+            "SELECT COUNT(*) AS count FROM programs WHERE island_idx = ?",
+            (island_idx,),
+        )
+        row = self.cursor.fetchone()
+        return int(row["count"]) if row else 0
+
+    def get_initial_program_row(self) -> Optional[dict[str, Any]]:
+        if self.island_repo is None:
+            raise ConnectionError("Repository island view not initialized.")
+        return self.island_repo.get_initial_program_row()
+
+    def get_best_program_row(self) -> Optional[dict[str, Any]]:
+        if self.island_repo is None:
+            raise ConnectionError("Repository island view not initialized.")
+        return self.island_repo.get_best_program_row()
+
+    def get_next_island_index(self) -> int:
+        if self.island_repo is None:
+            raise ConnectionError("Repository island view not initialized.")
+        return self.island_repo.get_next_island_index()
+
+    def list_migrant_ids(
+        self,
+        *,
+        source_idx: int,
+        num_migrants: int,
+        island_elitism: bool,
+    ) -> List[str]:
+        if not self.cursor:
+            raise ConnectionError("Repository not connected.")
+
+        self.cursor.execute(
+            """
+            SELECT COUNT(*) as count
+            FROM programs
+            WHERE island_idx = ? AND generation > 0 AND correct = 1
+            """,
+            (source_idx,),
+        )
+        row = self.cursor.fetchone()
+        available = int(row["count"]) if row else 0
+        if available == 0:
+            return []
+
+        limit = min(num_migrants, available)
+        params: List[Any] = [source_idx]
+        query = """
+            SELECT id
+            FROM programs
+            WHERE island_idx = ? AND generation > 0 AND correct = 1
+        """
+        if island_elitism:
+            self.cursor.execute(
+                """
+                SELECT id
+                FROM programs
+                WHERE island_idx = ? AND generation > 0 AND correct = 1
+                ORDER BY combined_score DESC
+                LIMIT 1
+                """,
+                (source_idx,),
+            )
+            elite_ids = [row["id"] for row in self.cursor.fetchall()]
+            if elite_ids:
+                placeholders = ",".join("?" * len(elite_ids))
+                query += f" AND id NOT IN ({placeholders})"
+                params.extend(elite_ids)
+
+        query += " ORDER BY RANDOM() LIMIT ?"
+        params.append(limit)
+        self.cursor.execute(query, params)
+        migrants = [row["id"] for row in self.cursor.fetchall()]
+        return list(dict.fromkeys(migrants))
+
+    def migrate_program(
+        self,
+        *,
+        migrant_id: str,
+        source_idx: int,
+        dest_idx: int,
+        current_generation: int,
+    ) -> None:
+        if self.read_only:
+            raise PermissionError("Cannot migrate program in read-only mode.")
+        if not self.cursor:
+            raise ConnectionError("Repository not connected.")
+
+        self.cursor.execute(
+            "SELECT migration_history FROM programs WHERE id = ?",
+            (migrant_id,),
+        )
+        row = self.cursor.fetchone()
+        history = (
+            json.loads(row["migration_history"])
+            if row and row["migration_history"]
+            else []
+        )
+        history.append(
+            {
+                "generation": current_generation,
+                "from": source_idx,
+                "to": dest_idx,
+                "timestamp": time.time(),
+            }
+        )
+        self.cursor.execute(
+            """
+            UPDATE programs
+            SET island_idx = ?, migration_history = ?
+            WHERE id = ?
+            """,
+            (dest_idx, json.dumps(history), migrant_id),
+        )
+
+    def get_program_brief(self, program_id: str) -> Optional[dict[str, Any]]:
+        if not self.cursor:
+            raise ConnectionError("Repository not connected.")
+        self.cursor.execute(
+            """
+            SELECT combined_score as score, children_count, generation, metadata, complexity
+            FROM programs
+            WHERE id = ?
+            """,
+            (program_id,),
+        )
+        row = self.cursor.fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["metadata"] = json.loads(result["metadata"] or "{}")
+        return result
+
+    def insert_program_copy_from_object(
+        self,
+        *,
+        program: Program,
+        island_idx: int,
+        metadata_updates: Dict[str, Any],
+        clear_copy_flag: bool,
+    ) -> str:
+        if self.read_only:
+            raise PermissionError("Cannot insert program copy in read-only mode.")
+        if not self.cursor:
+            raise ConnectionError("Repository not connected.")
+
+        metadata = dict(program.metadata or {})
+        if clear_copy_flag:
+            metadata.pop("_needs_island_copies", None)
+        metadata.update(metadata_updates)
+
+        new_id = str(uuid.uuid4())
+        self.cursor.execute(
+            """
+            INSERT INTO programs
+               (id, code, language, parent_id, archive_inspiration_ids,
+                top_k_inspiration_ids, generation, timestamp, code_diff,
+                combined_score, public_metrics, private_metrics,
+                text_feedback, complexity, embedding, embedding_pca_2d,
+                embedding_pca_3d, embedding_cluster_id, correct,
+                children_count, metadata, island_idx, migration_history,
+                system_prompt_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                       ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                new_id,
+                program.code,
+                program.language,
+                program.parent_id,
+                self._serialize_json(program.archive_inspiration_ids or []),
+                self._serialize_json(program.top_k_inspiration_ids or []),
+                program.generation,
+                program.timestamp,
+                program.code_diff,
+                program.combined_score,
+                self._serialize_json(program.public_metrics or {}),
+                self._serialize_json(program.private_metrics or {}),
+                self._serialize_text_feedback(program.text_feedback),
+                program.complexity,
+                self._serialize_json(program.embedding or []),
+                self._serialize_json(program.embedding_pca_2d or []),
+                self._serialize_json(program.embedding_pca_3d or []),
+                program.embedding_cluster_id,
+                program.correct,
+                program.children_count,
+                self._serialize_json(metadata),
+                island_idx,
+                self._serialize_json(program.migration_history or []),
+                program.system_prompt_id,
+            ),
+        )
+        return new_id
+
+    def insert_program_copy_from_row(
+        self,
+        *,
+        source_program: Dict[str, Any],
+        new_island_idx: int,
+        new_parent_id: Optional[str],
+        strategy: str,
+        is_root: bool = False,
+    ) -> str:
+        if self.read_only:
+            raise PermissionError("Cannot insert program copy in read-only mode.")
+        if not self.cursor:
+            raise ConnectionError("Repository not connected.")
+
+        raw_metadata = source_program.get("metadata") or "{}"
+        metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else json.loads(raw_metadata)
+        metadata["_spawned_island"] = True
+        metadata["_spawned_from_program_id"] = source_program["id"]
+        metadata["_spawn_island_idx"] = new_island_idx
+        metadata["_spawn_strategy"] = strategy
+        if not is_root:
+            metadata["_spawned_as_child"] = True
+
+        new_id = str(uuid.uuid4())
+        self.cursor.execute(
+            """
+            INSERT INTO programs
+               (id, code, language, parent_id, archive_inspiration_ids,
+                top_k_inspiration_ids, generation, timestamp, code_diff,
+                combined_score, public_metrics, private_metrics,
+                text_feedback, complexity, embedding, embedding_pca_2d,
+                embedding_pca_3d, embedding_cluster_id, correct,
+                children_count, metadata, island_idx, migration_history,
+                system_prompt_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                       ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                new_id,
+                source_program["code"],
+                source_program["language"],
+                new_parent_id,
+                source_program.get("archive_inspiration_ids") or "[]",
+                source_program.get("top_k_inspiration_ids") or "[]",
+                source_program.get("generation", 0),
+                time.time(),
+                None,
+                source_program.get("combined_score"),
+                source_program.get("public_metrics") or "{}",
+                source_program.get("private_metrics") or "{}",
+                source_program.get("text_feedback") or "",
+                source_program.get("complexity"),
+                source_program.get("embedding") or "[]",
+                source_program.get("embedding_pca_2d") or "[]",
+                source_program.get("embedding_pca_3d") or "[]",
+                source_program.get("embedding_cluster_id"),
+                source_program.get("correct", 0),
+                0,
+                json.dumps(metadata),
+                new_island_idx,
+                source_program.get("migration_history") or "[]",
+                source_program.get("system_prompt_id"),
+            ),
+        )
+        if new_parent_id:
+            self.cursor.execute(
+                "UPDATE programs SET children_count = children_count + 1 WHERE id = ?",
+                (new_parent_id,),
+            )
+        return new_id
+
+    def get_correct_child_rows(
+        self,
+        parent_id: str,
+        *,
+        limit: Optional[int] = None,
+    ) -> List[dict[str, Any]]:
+        if not self.cursor:
+            raise ConnectionError("Repository not connected.")
+        query = """
+            SELECT * FROM programs
+            WHERE parent_id = ? AND correct = 1
+            ORDER BY combined_score DESC
+        """
+        if limit:
+            query += f" LIMIT {limit}"
+        self.cursor.execute(query, (parent_id,))
+        return [dict(row) for row in self.cursor.fetchall()]
+
+    def commit(self) -> None:
+        if self.conn and not self.read_only:
+            self.conn.commit()
+
+    def update_program_metadata(
+        self,
+        program_id: str,
+        metadata: Dict[str, Any],
+    ) -> None:
+        if self.read_only:
+            raise PermissionError("Cannot update program metadata in read-only mode.")
+        if not self.cursor:
+            raise ConnectionError("Repository not connected.")
+        self.cursor.execute(
+            "UPDATE programs SET metadata = ? WHERE id = ?",
+            (self._serialize_json(metadata), program_id),
+        )
+
     def _list_programs(
         self,
         *,
@@ -547,19 +917,21 @@ class ProgramRepository:
             where += " AND correct = 1"
         return self._list_programs(where_sql=where, params=params)
 
-    def list_initialized_islands(self) -> List[int]:
-        """Return islands that currently have at least one correct program."""
-        if not self.cursor:
-            raise ConnectionError("Repository not connected.")
-        self.cursor.execute(
-            """
-            SELECT DISTINCT island_idx
-            FROM programs
-            WHERE correct = 1 AND island_idx IS NOT NULL
-            ORDER BY island_idx ASC
-            """
-        )
-        return [int(row["island_idx"]) for row in self.cursor.fetchall()]
+    def list_initialized_islands(self) -> List[Island]:
+        """Return computed initialized islands."""
+        if self.island_repo is None:
+            raise ConnectionError("Repository island view not initialized.")
+        return self.island_repo.list_initialized_islands()
+
+    def list_initialized_island_ids(self) -> List[int]:
+        if self.island_repo is None:
+            raise ConnectionError("Repository island view not initialized.")
+        return self.island_repo.list_initialized_island_ids()
+
+    def list_islands(self) -> List[Island]:
+        if self.island_repo is None:
+            raise ConnectionError("Repository island view not initialized.")
+        return self.island_repo.list_islands()
 
     def get_island_program_counts(
         self,

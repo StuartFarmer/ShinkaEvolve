@@ -9,11 +9,11 @@ from pathlib import Path
 import numpy as np
 from typing import Any, Dict, List, Optional, Tuple, Union
 import math
-from .complexity import analyze_code_metrics
 from .islands import CombinedIslandManager
 from .island_sampler import create_island_sampler, IslandSampler
 from .island_repository import IslandRepository
 from .metadata_repository import MetadataRepository
+from .program_write_service import ProgramWriteService
 from .display import DatabaseDisplay
 from shinka.embed import EmbeddingClient
 from shinka.defaults import default_archive_criteria
@@ -376,31 +376,53 @@ class ProgramDatabase:
             cursor=self.cursor,
             read_only=self.read_only,
         )
+        if not self.read_only:
+            self._create_tables()
+        from .repository import ProgramRepository
+
+        self.program_repository = ProgramRepository.from_existing_connection(
+            config=self.config,
+            conn=self.conn,
+            cursor=self.cursor,
+            read_only=self.read_only,
+        )
         self.island_repo = IslandRepository(
             conn=self.conn,
             cursor=self.cursor,
-            config=self.config,
+            num_islands=self.config.num_islands,
         )
-        if not self.read_only:
-            self._create_tables()
         self._load_metadata_from_db()
 
         # Initialize island manager now that database is ready
+        from .archive_policy import create_archive_policy
+
         self.island_manager = CombinedIslandManager(
-            cursor=self.cursor,
-            conn=self.conn,
-            config=self.config,
+            num_islands=self.config.num_islands,
+            migration_interval=self.config.migration_interval,
+            migration_rate=self.config.migration_rate,
+            island_elitism=self.config.island_elitism,
+            island_spawn_strategy=self.config.island_spawn_strategy,
+            island_spawn_subtree_size=self.config.island_spawn_subtree_size,
+            program_repository=self.program_repository,
+            island_repository=self.island_repo,
+            archive_policy=create_archive_policy(self.config),
+        )
+        self.program_write_service = ProgramWriteService(
+            program_repository=self.program_repository,
+            island_manager=self.island_manager,
+            update_best_program=self._update_best_program,
+            update_metadata=self._update_metadata_in_db,
+            recompute_embeddings=self._recompute_embeddings_and_clusters,
+            print_program_summary=self._print_program_summary,
+            maybe_spawn_island=self.check_and_spawn_island_if_stagnant,
         )
 
         # Initialize island sampler with configured strategy
-        island_selection_strategy = getattr(
-            self.config, "island_selection_strategy", "uniform"
-        )
         self.island_sampler = create_island_sampler(
             cursor=self.cursor,
             conn=self.conn,
-            config=self.config,
-            strategy=island_selection_strategy,
+            num_islands=self.config.num_islands,
+            strategy=self.config.island_selection_strategy,
         )
 
         count = self._count_programs_in_db()
@@ -614,166 +636,16 @@ class ProgramDatabase:
         """
         if self.read_only:
             raise PermissionError("Cannot add program in read-only mode.")
-        if not self.cursor or not self.conn:
+        if not hasattr(self, "program_write_service"):
             raise ConnectionError("DB not connected.")
-
-        self.island_manager.assign_island(program)
-
-        # Calculate complexity if not pre-set (or if default 0.0)
-        if program.complexity == 0.0:
-            try:
-                code_metrics = analyze_code_metrics(program.code, program.language)
-                program.complexity = code_metrics.get("complexity_score", 0.0)
-                if program.metadata is None:
-                    program.metadata = {}
-                program.metadata["code_analysis_metrics"] = code_metrics
-            except Exception as e:
-                logger.warning(
-                    f"Could not calculate complexity for program {program.id}: {e}"
-                )
-                program.complexity = float(len(program.code))  # Fallback to length
-
-        # Embedding is expected to be provided by the user.
-        # Ensure program.embedding is a list, even if empty.
-        if not isinstance(program.embedding, list):
-            logger.warning(
-                f"Program {program.id} embedding is not a list, "
-                "defaulting to empty list."
-            )
-            program.embedding = []
-
-        # Pre-serialize all JSON data once
-        public_metrics_json = json.dumps(program.public_metrics or {})
-        private_metrics_json = json.dumps(program.private_metrics or {})
-        metadata_json = json.dumps(program.metadata or {})
-        archive_insp_ids_json = json.dumps(program.archive_inspiration_ids or [])
-        top_k_insp_ids_json = json.dumps(program.top_k_inspiration_ids or [])
-        embedding_json = json.dumps(program.embedding)  # Serialize embedding
-        embedding_pca_2d_json = json.dumps(program.embedding_pca_2d or [])
-        embedding_pca_3d_json = json.dumps(program.embedding_pca_3d or [])
-        migration_history_json = json.dumps(program.migration_history or [])
-
-        # Handle text_feedback - convert to string if it's a list
-        text_feedback_str = program.text_feedback
-        if isinstance(text_feedback_str, list):
-            # Join list items with newlines for readability
-            text_feedback_str = "\n".join(str(item) for item in text_feedback_str)
-        elif text_feedback_str is None:
-            text_feedback_str = ""
-        else:
-            text_feedback_str = str(text_feedback_str)
-
-        # Begin transaction - this improves performance by batching operations
-        self.conn.execute("BEGIN TRANSACTION")
-
-        try:
-            # Insert the program in a single operation
-            self.cursor.execute(
-                """
-                INSERT INTO programs
-                   (id, code, language, parent_id, archive_inspiration_ids,
-                    top_k_inspiration_ids, generation, timestamp, code_diff,
-                    combined_score, public_metrics, private_metrics,
-                    text_feedback, complexity, embedding, embedding_pca_2d,
-                    embedding_pca_3d, embedding_cluster_id, correct,
-                    children_count, metadata, island_idx, migration_history,
-                    system_prompt_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                           ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    program.id,
-                    program.code,
-                    program.language,
-                    program.parent_id,
-                    archive_insp_ids_json,
-                    top_k_insp_ids_json,
-                    program.generation,
-                    program.timestamp,
-                    program.code_diff,
-                    program.combined_score,
-                    public_metrics_json,
-                    private_metrics_json,
-                    text_feedback_str,
-                    program.complexity,
-                    embedding_json,  # Use serialized embedding
-                    embedding_pca_2d_json,
-                    embedding_pca_3d_json,
-                    program.embedding_cluster_id,
-                    program.correct,
-                    program.children_count,
-                    metadata_json,
-                    program.island_idx,
-                    migration_history_json,
-                    program.system_prompt_id,
-                ),
-            )
-
-            # Increment parent's children_count
-            if program.parent_id:
-                self.cursor.execute(
-                    "UPDATE programs SET children_count = children_count + 1 "
-                    "WHERE id = ?",
-                    (program.parent_id,),
-                )
-
-            # Commit the main program insertion and related operations
-            self.conn.commit()
-            logger.info(
-                "Program %s added to DB - score: %s.",
-                program.id,
-                program.combined_score,
-            )
-
-        except sqlite3.IntegrityError as e:
-            self.conn.rollback()
-            logger.error(f"IntegrityError for program {program.id}: {e}")
-            raise
-        except Exception as e:
-            self.conn.rollback()
-            logger.error(f"Error adding program {program.id}: {e}")
-            raise
-
-        # Update best program tracking
-        self._update_best_program(program)
-
-        # Recompute embeddings and clusters for all programs
-        self._recompute_embeddings_and_clusters()
-
-        # Update generation tracking
-        if program.generation > self.last_iteration:
-            self.last_iteration = program.generation
-            self._update_metadata_in_db("last_iteration", str(self.last_iteration))
-
-        # Print verbose summary if requested
-        if verbose:
-            self._print_program_summary(program)
-
-        # Check if this program needs to be copied to other islands
-        if self.island_manager.needs_island_copies(program):
-            logger.info(
-                f"Creating copies of initial program {program.id} for all islands"
-            )
-            self.island_manager.copy_program_to_islands(program)
-            # Remove the flag from the original program's metadata
-            if program.metadata:
-                program.metadata.pop("_needs_island_copies", None)
-                metadata_json = json.dumps(program.metadata)
-                self.cursor.execute(
-                    "UPDATE programs SET metadata = ? WHERE id = ?",
-                    (metadata_json, program.id),
-                )
-                self.conn.commit()
-
-        # Check if migration should be scheduled
-        if self.island_manager.should_schedule_migration(program):
-            self._schedule_migration = True
-
-        # Check for stagnation and spawn new island if needed
-        self.check_and_spawn_island_if_stagnant(program.generation)
-
-        self.check_scheduled_operations()
-        return program.id
+        result = self.program_write_service.add(
+            program,
+            verbose=verbose,
+            current_last_iteration=self.last_iteration,
+        )
+        self.last_iteration = result.last_iteration
+        self._schedule_migration = False
+        return result.program_id
 
     def _program_from_row(self, row: sqlite3.Row) -> Optional[Program]:
         """Helper to create a Program object from a database row."""

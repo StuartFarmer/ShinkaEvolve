@@ -9,6 +9,7 @@ recomputed cheaply from the repository on demand.
 from __future__ import annotations
 
 import logging
+import random
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
@@ -28,6 +29,12 @@ class ArchivePolicy(ABC):
     @abstractmethod
     def compute(self, programs: List[Program]) -> List[Program]:
         """Return the current computed archive, ordered best-first."""
+
+    def pick_random(self, programs: List[Program]) -> Optional[Program]:
+        archive = self.compute(programs)
+        if not archive:
+            return None
+        return random.choice(archive)
 
     def _prepare_programs(self, programs: List[Program]) -> List[Program]:
         return sorted(

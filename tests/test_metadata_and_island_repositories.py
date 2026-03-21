@@ -57,11 +57,19 @@ def test_island_repository_reports_island_state():
             db.add(_program("p0", generation=0, island_idx=0))
             db.add(_program("p1", generation=1, island_idx=2))
 
-            repo = IslandRepository(conn=db.conn, cursor=db.cursor, config=db.config)
+            repo = IslandRepository(
+                conn=db.conn,
+                cursor=db.cursor,
+                num_islands=db.config.num_islands,
+            )
 
             assert repo.get_program_island("p1") == 2
-            assert repo.list_initialized_islands() == [0, 2]
-            assert repo.get_island_populations() == {0: 1, 2: 1}
+            initialized = repo.list_initialized_islands()
+            assert [island.island_idx for island in initialized] == [0, 2]
+            islands = repo.list_islands()
+            assert [island.island_idx for island in islands] == [0, 1, 2]
+            assert islands[1].initialized is False
+            assert repo.get_island_populations() == {0: 1, 1: 0, 2: 1}
             assert repo.get_next_island_index() == 3
             assert repo.get_best_program_row()["id"] == "p1"
             assert repo.get_initial_program_row()["id"] == "p0"

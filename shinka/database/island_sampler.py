@@ -4,8 +4,9 @@ import logging
 import random
 import sqlite3
 from abc import ABC, abstractmethod
-from typing import Any, List
+from typing import List
 import numpy as np
+from .island_repository import IslandRepository, Island
 
 logger = logging.getLogger(__name__)
 
@@ -17,14 +18,19 @@ class IslandSampler(ABC):
         self,
         cursor: sqlite3.Cursor,
         conn: sqlite3.Connection,
-        config: Any,
+        num_islands: int,
     ):
         self.cursor = cursor
         self.conn = conn
-        self.config = config
+        self.num_islands = num_islands
+        self.repository = IslandRepository(
+            conn=conn,
+            cursor=cursor,
+            num_islands=num_islands,
+        )
 
     @abstractmethod
-    def sample_island(self, initialized_islands: List[int]) -> int:
+    def sample_island(self, initialized_islands: List[Island]) -> int:
         """Sample an island index from the list of initialized islands.
 
         Args:
@@ -35,67 +41,23 @@ class IslandSampler(ABC):
         """
         pass
 
-    def _get_island_program_counts(self, island_indices: List[int]) -> dict[int, int]:
-        """Get the number of programs in each island.
-
-        Args:
-            island_indices: List of island indices to query
-
-        Returns:
-            Dictionary mapping island_idx to program count
-        """
-        if not island_indices:
-            return {}
-
-        placeholders = ",".join("?" * len(island_indices))
-        query = f"""
-            SELECT island_idx, COUNT(*) as count
-            FROM programs
-            WHERE island_idx IN ({placeholders}) AND correct = 1
-            GROUP BY island_idx
-        """
-        self.cursor.execute(query, island_indices)
-
-        counts = {island_idx: 0 for island_idx in island_indices}
-        for row in self.cursor.fetchall():
-            counts[row["island_idx"]] = row["count"]
-
-        return counts
-
-    def _get_island_best_fitness(self, island_indices: List[int]) -> dict[int, float]:
-        """Get the best fitness (combined_score) from each island.
-
-        Args:
-            island_indices: List of island indices to query
-
-        Returns:
-            Dictionary mapping island_idx to best combined_score
-        """
-        if not island_indices:
-            return {}
-
-        placeholders = ",".join("?" * len(island_indices))
-        query = f"""
-            SELECT island_idx, MAX(combined_score) as best_fitness
-            FROM programs
-            WHERE island_idx IN ({placeholders}) AND correct = 1
-            GROUP BY island_idx
-        """
-        self.cursor.execute(query, island_indices)
-
-        fitness = {}
-        for row in self.cursor.fetchall():
-            fitness[row["island_idx"]] = row["best_fitness"]
-
-        return fitness
+    def _normalize_islands(self, initialized_islands: List[Island | int]) -> List[Island]:
+        normalized: List[Island] = []
+        for island in initialized_islands:
+            if isinstance(island, Island):
+                normalized.append(island)
+            else:
+                normalized.append(self.repository.get_island(int(island)))
+        return normalized
 
 
 class UniformIslandSampler(IslandSampler):
     """Uniformly sample from initialized islands (default behavior)."""
 
-    def sample_island(self, initialized_islands: List[int]) -> int:
+    def sample_island(self, initialized_islands: List[Island | int]) -> int:
         """Uniformly sample an island."""
-        return random.choice(initialized_islands)
+        initialized_islands = self._normalize_islands(initialized_islands)
+        return random.choice(initialized_islands).island_idx
 
 
 class EqualIslandSampler(IslandSampler):
@@ -104,18 +66,19 @@ class EqualIslandSampler(IslandSampler):
     If multiple islands have the same minimum count, sample uniformly among them.
     """
 
-    def sample_island(self, initialized_islands: List[int]) -> int:
+    def sample_island(self, initialized_islands: List[Island | int]) -> int:
         """Sample island with fewest programs."""
-        counts = self._get_island_program_counts(initialized_islands)
-
-        min_count = min(counts.values())
+        initialized_islands = self._normalize_islands(initialized_islands)
+        min_count = min(island.correct_programs for island in initialized_islands)
         islands_with_min = [
-            island_idx for island_idx, count in counts.items() if count == min_count
+            island.island_idx
+            for island in initialized_islands
+            if island.correct_programs == min_count
         ]
 
         sampled = random.choice(islands_with_min)
         logger.debug(
-            f"EqualIslandSampler: Island counts = {counts}, "
+            f"EqualIslandSampler: Island counts = {[island.correct_programs for island in initialized_islands]}, "
             f"min_count = {min_count}, sampled = {sampled}"
         )
         return sampled
@@ -131,19 +94,17 @@ class ProportionalIslandSampler(IslandSampler):
         self,
         cursor: sqlite3.Cursor,
         conn: sqlite3.Connection,
-        config: Any,
+        num_islands: int,
         temperature: float = 1.0,
     ):
-        super().__init__(cursor, conn, config)
+        super().__init__(cursor, conn, num_islands)
         self.temperature = temperature
 
-    def sample_island(self, initialized_islands: List[int]) -> int:
+    def sample_island(self, initialized_islands: List[Island | int]) -> int:
         """Sample island proportional to best fitness."""
-        fitness_dict = self._get_island_best_fitness(initialized_islands)
-
-        # Extract fitness values in the same order as initialized_islands
+        initialized_islands = self._normalize_islands(initialized_islands)
         fitness_values = np.array(
-            [fitness_dict.get(island_idx, 0.0) for island_idx in initialized_islands]
+            [island.best_score for island in initialized_islands]
         )
 
         # Apply Boltzmann distribution: exp(fitness / temperature)
@@ -152,10 +113,10 @@ class ProportionalIslandSampler(IslandSampler):
 
         # Sample according to probabilities
         sampled_idx = np.random.choice(len(initialized_islands), p=probabilities)
-        sampled_island = initialized_islands[sampled_idx]
+        sampled_island = initialized_islands[sampled_idx].island_idx
 
         logger.debug(
-            f"ProportionalIslandSampler: fitness = {fitness_dict}, "
+            f"ProportionalIslandSampler: fitness = {[island.best_score for island in initialized_islands]}, "
             f"probabilities = {probabilities}, sampled = {sampled_island}"
         )
         return sampled_island
@@ -172,24 +133,22 @@ class WeightedIslandSampler(IslandSampler):
         self,
         cursor: sqlite3.Cursor,
         conn: sqlite3.Connection,
-        config: Any,
+        num_islands: int,
         fitness_weight: float = 1.0,
         count_weight: float = 1.0,
     ):
-        super().__init__(cursor, conn, config)
+        super().__init__(cursor, conn, num_islands)
         self.fitness_weight = fitness_weight
         self.count_weight = count_weight
 
-    def sample_island(self, initialized_islands: List[int]) -> int:
+    def sample_island(self, initialized_islands: List[Island | int]) -> int:
         """Sample island using weighted combination of fitness and inverse count."""
-        counts = self._get_island_program_counts(initialized_islands)
-        fitness_dict = self._get_island_best_fitness(initialized_islands)
-
+        initialized_islands = self._normalize_islands(initialized_islands)
         # Calculate weights for each island
         weights = []
-        for island_idx in initialized_islands:
-            count = counts.get(island_idx, 1)
-            fitness = fitness_dict.get(island_idx, 0.0)
+        for island in initialized_islands:
+            count = island.correct_programs or 1
+            fitness = island.best_score
 
             # Weight = fitness^fitness_weight / count^count_weight
             # More fitness -> higher weight, more programs -> lower weight
@@ -206,10 +165,11 @@ class WeightedIslandSampler(IslandSampler):
 
         # Sample according to probabilities
         sampled_idx = np.random.choice(len(initialized_islands), p=probabilities)
-        sampled_island = initialized_islands[sampled_idx]
+        sampled_island = initialized_islands[sampled_idx].island_idx
 
         logger.debug(
-            f"WeightedIslandSampler: counts = {counts}, fitness = {fitness_dict}, "
+            f"WeightedIslandSampler: counts = {[island.correct_programs for island in initialized_islands]}, "
+            f"fitness = {[island.best_score for island in initialized_islands]}, "
             f"weights = {weights}, probabilities = {probabilities}, "
             f"sampled = {sampled_island}"
         )
@@ -219,7 +179,7 @@ class WeightedIslandSampler(IslandSampler):
 def create_island_sampler(
     cursor: sqlite3.Cursor,
     conn: sqlite3.Connection,
-    config: Any,
+    num_islands: int,
     strategy: str = "uniform",
 ) -> IslandSampler:
     """Factory function to create island samplers.
@@ -227,7 +187,7 @@ def create_island_sampler(
     Args:
         cursor: Database cursor
         conn: Database connection
-        config: Database configuration
+    num_islands: Number of configured base islands
         strategy: Sampling strategy name
 
     Returns:
@@ -237,14 +197,14 @@ def create_island_sampler(
         ValueError: If strategy is unknown
     """
     if strategy == "uniform":
-        return UniformIslandSampler(cursor, conn, config)
+        return UniformIslandSampler(cursor, conn, num_islands)
     elif strategy == "equal":
-        return EqualIslandSampler(cursor, conn, config)
+        return EqualIslandSampler(cursor, conn, num_islands)
     elif strategy == "proportional":
-        return ProportionalIslandSampler(cursor, conn, config, temperature=1.0)
+        return ProportionalIslandSampler(cursor, conn, num_islands, temperature=1.0)
     elif strategy == "weighted":
         return WeightedIslandSampler(
-            cursor, conn, config, fitness_weight=1.0, count_weight=1.0
+            cursor, conn, num_islands, fitness_weight=1.0, count_weight=1.0
         )
     else:
         raise ValueError(

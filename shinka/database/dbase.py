@@ -409,12 +409,10 @@ class ProgramDatabase:
     def _get_database_display(self) -> DatabaseDisplay:
         if not hasattr(self, "_database_display"):
             self._database_display = DatabaseDisplay(
-                cursor=self.cursor,
-                conn=self.conn,
+                program_repository=self.program_repository,
                 config=self.config,
                 island_manager=self.island_manager,
-                count_programs_func=self._count_programs_in_db,
-                get_best_program_func=lambda: self.program_repository.get_best(),
+                archive_policy=self.archive_policy,
                 default_console=self.display_console,
             )
         return self._database_display

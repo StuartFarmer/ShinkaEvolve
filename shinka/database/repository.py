@@ -1,25 +1,18 @@
 """
-SQLite-backed repository for persisted `Program` records.
+ORM-backed repository for persisted `Program` records.
 
-This repository is the storage boundary for the evolution system. It owns:
+The repository is the storage boundary for the evolution system. It owns:
 
-- database connection / schema setup
-- row <-> `Program` serialization
-- persistence-oriented queries
+- connection / session wiring
+- schema bootstrap for `programs`
+- `Program` <-> `ProgramRecord` mapping
+- persistence-oriented queries and mutations
 
-It does not own search policy:
-
-- no parent sampling
-- no inspiration sampling
-- no island sampling
-- no novelty logic
-
-Those concerns should depend on the repository, not be embedded inside it.
+It does not own search policy.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 import sqlite3
@@ -30,17 +23,20 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
+from sqlalchemy import create_engine, func, select, update
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from .complexity import analyze_code_metrics
 from .dbase import DatabaseConfig, Program
-from .island_repository import IslandRepository, Island
+from .island_repository import Island, IslandRepository
 from .metadata_repository import MetadataRepository
+from .models import Base, ProgramRecord
 
 logger = logging.getLogger(__name__)
 
 
 def _clean_nan_values(obj: Any) -> Any:
-    """Recursively replace NaN/Inf values so JSON serialization remains valid."""
     if isinstance(obj, dict):
         return {key: _clean_nan_values(value) for key, value in obj.items()}
     if isinstance(obj, list):
@@ -53,31 +49,26 @@ def _clean_nan_values(obj: Any) -> Any:
         return None
     if hasattr(obj, "dtype") and np.issubdtype(obj.dtype, np.floating):
         if np.isscalar(obj):
-            if np.isnan(obj) or np.isinf(obj):
-                return None
-            return float(obj)
+            return None if np.isnan(obj) or np.isinf(obj) else float(obj)
         return _clean_nan_values(obj.tolist())
     return obj
 
 
+def _normalize_text_feedback(text_feedback: Any) -> str:
+    if isinstance(text_feedback, list):
+        return "\n".join(str(item) for item in text_feedback)
+    if text_feedback is None:
+        return ""
+    return str(text_feedback)
+
+
 @dataclass(frozen=True)
 class ProgramCountSnapshot:
-    """Lightweight repository snapshot for polling/refresh checks."""
-
     count: int
     max_timestamp: float | None
 
 
 class ProgramRepository:
-    """
-    Persistence-only repository for `Program`.
-
-    The repository uses direct SQLite access and deliberately avoids depending on
-    `ProgramDatabase` for core reads/writes. A temporary legacy escape hatch can
-    still materialize a `ProgramDatabase` for code paths that have not been
-    migrated yet.
-    """
-
     def __init__(
         self,
         config: DatabaseConfig,
@@ -88,6 +79,8 @@ class ProgramRepository:
         self.read_only = read_only
         self.conn: sqlite3.Connection | None = None
         self.cursor: sqlite3.Cursor | None = None
+        self.engine = None
+        self.SessionLocal = None
 
         self.last_iteration: int = 0
         self.best_program_id: str | None = None
@@ -105,9 +98,7 @@ class ProgramRepository:
         *,
         embedding_model: str = "text-embedding-3-small",
         read_only: bool = False,
-    ) -> "ProgramRepository":
-        # `embedding_model` is intentionally ignored here. It is kept only so
-        # existing call sites can migrate without churn.
+    ) -> ProgramRepository:
         _ = embedding_model
         return cls(config=config, read_only=read_only)
 
@@ -118,12 +109,9 @@ class ProgramRepository:
         *,
         num_islands: int = 0,
         read_only: bool = False,
-    ) -> "ProgramRepository":
+    ) -> ProgramRepository:
         return cls(
-            config=DatabaseConfig(
-                db_path=db_path,
-                num_islands=num_islands,
-            ),
+            config=DatabaseConfig(db_path=db_path, num_islands=num_islands),
             read_only=read_only,
         )
 
@@ -135,12 +123,24 @@ class ProgramRepository:
         conn: sqlite3.Connection,
         cursor: sqlite3.Cursor,
         read_only: bool = False,
-    ) -> "ProgramRepository":
+        ensure_schema: bool = False,
+    ) -> ProgramRepository:
         repo = cls.__new__(cls)
         repo.config = config
         repo.read_only = read_only
         repo.conn = conn
         repo.cursor = cursor
+        repo.engine = create_engine(
+            "sqlite://",
+            creator=lambda: conn,
+            poolclass=StaticPool,
+            future=True,
+        )
+        repo.SessionLocal = sessionmaker(
+            bind=repo.engine,
+            expire_on_commit=False,
+            future=True,
+        )
         repo.last_iteration = 0
         repo.best_program_id = None
         repo.metadata_repo = MetadataRepository(
@@ -153,24 +153,28 @@ class ProgramRepository:
             cursor=cursor,
             num_islands=config.num_islands,
         )
+        if ensure_schema and not read_only:
+            repo._ensure_schema()
         repo._load_metadata()
         return repo
 
     def _connect(self) -> None:
-        db_path_str = getattr(self.config, "db_path", None)
-
+        db_path_str = self.config.db_path
         if db_path_str:
             db_file = Path(db_path_str).resolve()
-            if not self.read_only:
-                db_file.parent.mkdir(parents=True, exist_ok=True)
-                self.conn = sqlite3.connect(str(db_file), timeout=30.0)
-            else:
+            if self.read_only:
                 if not db_file.exists():
                     raise FileNotFoundError(
                         f"Database file not found for read-only connection: {db_file}"
                     )
-                db_uri = f"file:{db_file}?mode=ro"
-                self.conn = sqlite3.connect(db_uri, uri=True, timeout=30.0)
+                self.conn = sqlite3.connect(
+                    f"file:{db_file}?mode=ro",
+                    uri=True,
+                    timeout=30.0,
+                )
+            else:
+                db_file.parent.mkdir(parents=True, exist_ok=True)
+                self.conn = sqlite3.connect(str(db_file), timeout=30.0)
         else:
             if self.read_only:
                 raise ValueError("Read-only repository requires config.db_path")
@@ -178,6 +182,17 @@ class ProgramRepository:
 
         self.conn.row_factory = sqlite3.Row
         self.cursor = self.conn.cursor()
+        self.engine = create_engine(
+            "sqlite://",
+            creator=lambda: self.conn,
+            poolclass=StaticPool,
+            future=True,
+        )
+        self.SessionLocal = sessionmaker(
+            bind=self.engine,
+            expire_on_commit=False,
+            future=True,
+        )
         self.metadata_repo = MetadataRepository(
             conn=self.conn,
             cursor=self.cursor,
@@ -190,11 +205,10 @@ class ProgramRepository:
         )
 
     def _ensure_schema(self) -> None:
-        if not self.cursor or not self.conn:
-            raise ConnectionError("Repository not connected.")
-
         if self.read_only:
             return
+        if not self.conn or not self.cursor or self.engine is None:
+            raise ConnectionError("Repository not connected.")
 
         self.cursor.execute("PRAGMA journal_mode = WAL;")
         self.cursor.execute("PRAGMA busy_timeout = 30000;")
@@ -204,78 +218,10 @@ class ProgramRepository:
         self.cursor.execute("PRAGMA temp_store = MEMORY;")
         self.cursor.execute("PRAGMA foreign_keys = ON;")
 
-        self.cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS programs (
-                id TEXT PRIMARY KEY,
-                code TEXT NOT NULL,
-                language TEXT NOT NULL,
-                parent_id TEXT,
-                archive_inspiration_ids TEXT,
-                top_k_inspiration_ids TEXT,
-                generation INTEGER NOT NULL,
-                timestamp REAL NOT NULL,
-                code_diff TEXT,
-                combined_score REAL,
-                public_metrics TEXT,
-                private_metrics TEXT,
-                text_feedback TEXT,
-                complexity REAL,
-                embedding TEXT,
-                embedding_pca_2d TEXT,
-                embedding_pca_3d TEXT,
-                embedding_cluster_id INTEGER,
-                correct BOOLEAN DEFAULT 0,
-                children_count INTEGER NOT NULL DEFAULT 0,
-                metadata TEXT,
-                migration_history TEXT,
-                island_idx INTEGER,
-                system_prompt_id TEXT
-            )
-            """
-        )
-
-        idx_cmds = [
-            "CREATE INDEX IF NOT EXISTS idx_programs_generation ON programs(generation)",
-            "CREATE INDEX IF NOT EXISTS idx_programs_timestamp ON programs(timestamp)",
-            "CREATE INDEX IF NOT EXISTS idx_programs_complexity ON programs(complexity)",
-            "CREATE INDEX IF NOT EXISTS idx_programs_parent_id ON programs(parent_id)",
-            "CREATE INDEX IF NOT EXISTS idx_programs_children_count ON programs(children_count)",
-            "CREATE INDEX IF NOT EXISTS idx_programs_island_idx ON programs(island_idx)",
-            "CREATE INDEX IF NOT EXISTS idx_programs_system_prompt_id ON programs(system_prompt_id)",
-        ]
-        for cmd in idx_cmds:
-            self.cursor.execute(cmd)
-
-        self.cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS archive (
-                program_id TEXT PRIMARY KEY,
-                FOREIGN KEY (program_id) REFERENCES programs(id) ON DELETE CASCADE
-            )
-            """
-        )
-
+        Base.metadata.create_all(self.engine)
         if self.metadata_repo is None:
             raise ConnectionError("Repository metadata store not initialized.")
         self.metadata_repo.ensure_schema()
-
-        self.conn.commit()
-        self._run_migrations()
-
-    def _run_migrations(self) -> None:
-        if not self.cursor or not self.conn or self.read_only:
-            return
-
-        self.cursor.execute("PRAGMA table_info(programs)")
-        columns = [row[1] for row in self.cursor.fetchall()]
-
-        if "text_feedback" not in columns:
-            self.cursor.execute(
-                "ALTER TABLE programs ADD COLUMN text_feedback TEXT DEFAULT ''"
-            )
-        if "system_prompt_id" not in columns:
-            self.cursor.execute("ALTER TABLE programs ADD COLUMN system_prompt_id TEXT")
         self.conn.commit()
 
     def _load_metadata(self) -> None:
@@ -291,76 +237,103 @@ class ProgramRepository:
         self.metadata_repo.set(key, value)
 
     def get_metadata(self, key: str, default: Optional[str] = None) -> Optional[str]:
-        """Fetch one metadata value from the repository-local metadata store."""
         if self.metadata_repo is None:
             raise ConnectionError("Repository metadata store not initialized.")
         return self.metadata_repo.get(key, default)
 
     def set_metadata(self, key: str, value: Optional[str]) -> None:
-        """Persist one metadata value."""
         self._update_metadata(key, value)
 
-    def _serialize_json(self, value: Any) -> str:
-        return json.dumps(_clean_nan_values(value))
+    def _session(self) -> Session:
+        if self.SessionLocal is None:
+            raise ConnectionError("Repository not connected.")
+        return self.SessionLocal()
 
-    def _serialize_text_feedback(self, text_feedback: Any) -> str:
-        if isinstance(text_feedback, list):
-            return "\n".join(str(item) for item in text_feedback)
-        if text_feedback is None:
-            return ""
-        return str(text_feedback)
-
-    def _row_to_program(self, row: sqlite3.Row | None) -> Optional[Program]:
-        if not row:
+    def _record_to_program(self, record: ProgramRecord | None) -> Optional[Program]:
+        if record is None:
             return None
+        return Program.from_dict(
+            {
+                "id": record.id,
+                "code": record.code,
+                "language": record.language,
+                "parent_id": record.parent_id,
+                "archive_inspiration_ids": record.archive_inspiration_ids or [],
+                "top_k_inspiration_ids": record.top_k_inspiration_ids or [],
+                "generation": record.generation,
+                "timestamp": record.timestamp,
+                "code_diff": record.code_diff,
+                "combined_score": record.combined_score,
+                "public_metrics": record.public_metrics or {},
+                "private_metrics": record.private_metrics or {},
+                "text_feedback": record.text_feedback or "",
+                "complexity": record.complexity,
+                "embedding": record.embedding or [],
+                "embedding_pca_2d": record.embedding_pca_2d or [],
+                "embedding_pca_3d": record.embedding_pca_3d or [],
+                "embedding_cluster_id": record.embedding_cluster_id,
+                "correct": bool(record.correct),
+                "children_count": record.children_count,
+                "metadata": record.program_metadata or {},
+                "island_idx": record.island_idx,
+                "migration_history": record.migration_history or [],
+                "system_prompt_id": record.system_prompt_id,
+            }
+        )
 
-        data = dict(row)
+    def _record_to_summary(self, record: ProgramRecord) -> dict[str, Any]:
+        return {
+            "id": record.id,
+            "parent_id": record.parent_id,
+            "generation": record.generation,
+            "timestamp": record.timestamp,
+            "combined_score": record.combined_score,
+            "correct": bool(record.correct),
+            "complexity": record.complexity,
+            "island_idx": record.island_idx,
+            "children_count": record.children_count,
+            "public_metrics": record.public_metrics or {},
+            "private_metrics": record.private_metrics or {},
+            "metadata": record.program_metadata or {},
+            "embedding_pca_2d": record.embedding_pca_2d or [],
+            "embedding_pca_3d": record.embedding_pca_3d or [],
+            "embedding_cluster_id": record.embedding_cluster_id,
+            "language": record.language,
+            "top_k_inspiration_ids": record.top_k_inspiration_ids or [],
+            "archive_inspiration_ids": record.archive_inspiration_ids or [],
+            "migration_history": record.migration_history or [],
+            "in_archive": False,
+        }
 
-        json_dict_fields = ["public_metrics", "private_metrics", "metadata"]
-        json_list_fields = [
-            "archive_inspiration_ids",
-            "top_k_inspiration_ids",
-            "embedding",
-            "embedding_pca_2d",
-            "embedding_pca_3d",
-            "migration_history",
-        ]
+    def _program_query(
+        self,
+        *,
+        correct_only: Optional[bool] = None,
+        island_idx: Optional[int] = None,
+        generation: Optional[int] = None,
+        parent_id: Optional[str] = None,
+    ):
+        query = select(ProgramRecord)
+        if correct_only is True:
+            query = query.where(ProgramRecord.correct.is_(True))
+        elif correct_only is False:
+            query = query.where(ProgramRecord.correct.is_(False))
+        if island_idx is not None:
+            query = query.where(ProgramRecord.island_idx == island_idx)
+        if generation is not None:
+            query = query.where(ProgramRecord.generation == generation)
+        if parent_id is not None:
+            query = query.where(ProgramRecord.parent_id == parent_id)
+        return query
 
-        for field in json_dict_fields:
-            raw = data.get(field)
-            if raw:
-                try:
-                    data[field] = json.loads(raw)
-                except json.JSONDecodeError:
-                    data[field] = {}
-            else:
-                data[field] = {}
-
-        for field in json_list_fields:
-            raw = data.get(field)
-            if raw:
-                try:
-                    data[field] = json.loads(raw)
-                except json.JSONDecodeError:
-                    data[field] = []
-            else:
-                data[field] = []
-
-        if "text_feedback" not in data or data["text_feedback"] is None:
-            data["text_feedback"] = ""
-
-        in_archive = data.get("in_archive")
-        if in_archive is not None:
-            data["in_archive"] = bool(in_archive)
-
-        return Program.from_dict(data)
+    def _list_programs(self, query) -> List[Program]:
+        with self._session() as session:
+            records = session.execute(query).scalars().all()
+        return [p for p in (self._record_to_program(record) for record in records) if p is not None]
 
     def add(self, program: Program, *, verbose: bool = False) -> str:
-        """Persist a fully constructed program."""
         if self.read_only:
             raise PermissionError("Cannot add program in read-only mode.")
-        if not self.cursor or not self.conn:
-            raise ConnectionError("Repository not connected.")
 
         if program.complexity == 0.0:
             try:
@@ -380,66 +353,42 @@ class ProgramRepository:
         if not isinstance(program.embedding, list):
             program.embedding = []
 
-        text_feedback = program.text_feedback
-        if isinstance(text_feedback, list):
-            text_feedback = "\n".join(str(item) for item in text_feedback)
-        elif text_feedback is None:
-            text_feedback = ""
-        else:
-            text_feedback = str(text_feedback)
-
-        self.conn.execute("BEGIN TRANSACTION")
-        try:
-            self.cursor.execute(
-                """
-                INSERT INTO programs
-                   (id, code, language, parent_id, archive_inspiration_ids,
-                    top_k_inspiration_ids, generation, timestamp, code_diff,
-                    combined_score, public_metrics, private_metrics,
-                    text_feedback, complexity, embedding, embedding_pca_2d,
-                    embedding_pca_3d, embedding_cluster_id, correct,
-                    children_count, metadata, island_idx, migration_history,
-                    system_prompt_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    program.id,
-                    program.code,
-                    program.language,
-                    program.parent_id,
-                    self._serialize_json(program.archive_inspiration_ids or []),
-                    self._serialize_json(program.top_k_inspiration_ids or []),
-                    program.generation,
-                    program.timestamp,
-                    program.code_diff,
-                    program.combined_score,
-                    self._serialize_json(program.public_metrics or {}),
-                    self._serialize_json(program.private_metrics or {}),
-                    text_feedback,
-                    program.complexity,
-                    self._serialize_json(program.embedding or []),
-                    self._serialize_json(program.embedding_pca_2d or []),
-                    self._serialize_json(program.embedding_pca_3d or []),
-                    program.embedding_cluster_id,
-                    program.correct,
-                    program.children_count,
-                    self._serialize_json(program.metadata or {}),
-                    program.island_idx,
-                    self._serialize_json(program.migration_history or []),
-                    program.system_prompt_id,
-                ),
-            )
-
-            if program.parent_id:
-                self.cursor.execute(
-                    "UPDATE programs SET children_count = children_count + 1 WHERE id = ?",
-                    (program.parent_id,),
+        with self._session() as session:
+            session.add(
+                ProgramRecord(
+                    id=program.id,
+                    code=program.code,
+                    language=program.language,
+                    parent_id=program.parent_id,
+                    archive_inspiration_ids=_clean_nan_values(program.archive_inspiration_ids or []),
+                    top_k_inspiration_ids=_clean_nan_values(program.top_k_inspiration_ids or []),
+                    generation=program.generation,
+                    timestamp=program.timestamp,
+                    code_diff=program.code_diff,
+                    combined_score=program.combined_score,
+                    public_metrics=_clean_nan_values(program.public_metrics or {}),
+                    private_metrics=_clean_nan_values(program.private_metrics or {}),
+                    text_feedback=_normalize_text_feedback(program.text_feedback),
+                    complexity=program.complexity,
+                    embedding=_clean_nan_values(program.embedding or []),
+                    embedding_pca_2d=_clean_nan_values(program.embedding_pca_2d or []),
+                    embedding_pca_3d=_clean_nan_values(program.embedding_pca_3d or []),
+                    embedding_cluster_id=program.embedding_cluster_id,
+                    correct=bool(program.correct),
+                    children_count=program.children_count,
+                    program_metadata=_clean_nan_values(program.metadata or {}),
+                    island_idx=program.island_idx,
+                    migration_history=_clean_nan_values(program.migration_history or []),
+                    system_prompt_id=program.system_prompt_id,
                 )
-
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
+            )
+            if program.parent_id:
+                session.execute(
+                    update(ProgramRecord)
+                    .where(ProgramRecord.id == program.parent_id)
+                    .values(children_count=ProgramRecord.children_count + 1)
+                )
+            session.commit()
 
         if program.generation > self.last_iteration:
             self.last_iteration = program.generation
@@ -456,35 +405,26 @@ class ProgramRepository:
                 program.id,
                 program.combined_score,
             )
-
         return program.id
 
     def get(self, program_id: str) -> Optional[Program]:
-        """Fetch one program by id."""
-        if not self.cursor:
-            raise ConnectionError("Repository not connected.")
-        self.cursor.execute("SELECT * FROM programs WHERE id = ?", (program_id,))
-        return self._row_to_program(self.cursor.fetchone())
+        with self._session() as session:
+            return self._record_to_program(session.get(ProgramRecord, program_id))
 
     def get_children_count(self, program_id: str) -> int:
-        """Return the number of persisted children for one program."""
-        if not self.cursor:
-            raise ConnectionError("Repository not connected.")
-        self.cursor.execute(
-            "SELECT children_count FROM programs WHERE id = ?",
-            (program_id,),
-        )
-        row = self.cursor.fetchone()
-        return int(row["children_count"]) if row else 0
+        with self._session() as session:
+            record = session.get(ProgramRecord, program_id)
+            return int(record.children_count) if record else 0
 
     def get_many(self, program_ids: List[str]) -> List[Program]:
-        """Fetch multiple programs, preserving order and skipping missing ids."""
-        programs: List[Program] = []
-        for program_id in program_ids:
-            program = self.get(program_id)
-            if program is not None:
-                programs.append(program)
-        return programs
+        if not program_ids:
+            return []
+        with self._session() as session:
+            records = session.execute(
+                select(ProgramRecord).where(ProgramRecord.id.in_(program_ids))
+            ).scalars()
+            by_id = {record.id: self._record_to_program(record) for record in records}
+        return [by_id[program_id] for program_id in program_ids if by_id.get(program_id) is not None]
 
     def get_program_count(self) -> int:
         if self.island_repo is None:
@@ -492,24 +432,32 @@ class ProgramRepository:
         return self.island_repo.get_program_count()
 
     def count_by_island(self, island_idx: int) -> int:
-        if not self.cursor:
-            raise ConnectionError("Repository not connected.")
-        self.cursor.execute(
-            "SELECT COUNT(*) AS count FROM programs WHERE island_idx = ?",
-            (island_idx,),
-        )
-        row = self.cursor.fetchone()
-        return int(row["count"]) if row else 0
+        with self._session() as session:
+            return int(
+                session.scalar(
+                    select(func.count()).select_from(ProgramRecord).where(
+                        ProgramRecord.island_idx == island_idx
+                    )
+                )
+                or 0
+            )
 
     def get_initial_program_row(self) -> Optional[dict[str, Any]]:
-        if self.island_repo is None:
-            raise ConnectionError("Repository island view not initialized.")
-        return self.island_repo.get_initial_program_row()
+        with self._session() as session:
+            record = session.scalar(
+                select(ProgramRecord)
+                .where(
+                    ProgramRecord.generation == 0,
+                    ProgramRecord.parent_id.is_(None),
+                )
+                .order_by(ProgramRecord.timestamp.asc())
+                .limit(1)
+            )
+        return None if record is None else self._record_to_program(record).to_dict()
 
     def get_best_program_row(self) -> Optional[dict[str, Any]]:
-        if self.island_repo is None:
-            raise ConnectionError("Repository island view not initialized.")
-        return self.island_repo.get_best_program_row()
+        best = self.get_best()
+        return None if best is None else best.to_dict()
 
     def get_next_island_index(self) -> int:
         if self.island_repo is None:
@@ -523,51 +471,40 @@ class ProgramRepository:
         num_migrants: int,
         island_elitism: bool,
     ) -> List[str]:
-        if not self.cursor:
-            raise ConnectionError("Repository not connected.")
-
-        self.cursor.execute(
-            """
-            SELECT COUNT(*) as count
-            FROM programs
-            WHERE island_idx = ? AND generation > 0 AND correct = 1
-            """,
-            (source_idx,),
-        )
-        row = self.cursor.fetchone()
-        available = int(row["count"]) if row else 0
-        if available == 0:
-            return []
-
-        limit = min(num_migrants, available)
-        params: List[Any] = [source_idx]
-        query = """
-            SELECT id
-            FROM programs
-            WHERE island_idx = ? AND generation > 0 AND correct = 1
-        """
-        if island_elitism:
-            self.cursor.execute(
-                """
-                SELECT id
-                FROM programs
-                WHERE island_idx = ? AND generation > 0 AND correct = 1
-                ORDER BY combined_score DESC
-                LIMIT 1
-                """,
-                (source_idx,),
+        with self._session() as session:
+            base = (
+                select(ProgramRecord.id)
+                .where(
+                    ProgramRecord.island_idx == source_idx,
+                    ProgramRecord.generation > 0,
+                    ProgramRecord.correct.is_(True),
+                )
             )
-            elite_ids = [row["id"] for row in self.cursor.fetchall()]
-            if elite_ids:
-                placeholders = ",".join("?" * len(elite_ids))
-                query += f" AND id NOT IN ({placeholders})"
-                params.extend(elite_ids)
-
-        query += " ORDER BY RANDOM() LIMIT ?"
-        params.append(limit)
-        self.cursor.execute(query, params)
-        migrants = [row["id"] for row in self.cursor.fetchall()]
-        return list(dict.fromkeys(migrants))
+            available = int(
+                session.scalar(
+                    select(func.count()).select_from(ProgramRecord).where(
+                        ProgramRecord.island_idx == source_idx,
+                        ProgramRecord.generation > 0,
+                        ProgramRecord.correct.is_(True),
+                    )
+                )
+                or 0
+            )
+            if available == 0:
+                return []
+            if island_elitism:
+                elite_id = session.scalar(
+                    base.order_by(ProgramRecord.combined_score.desc()).limit(1)
+                )
+                if elite_id:
+                    base = base.where(ProgramRecord.id != elite_id)
+            return list(
+                dict.fromkeys(
+                    session.execute(
+                        base.order_by(func.random()).limit(min(num_migrants, available))
+                    ).scalars().all()
+                )
+            )
 
     def migrate_program(
         self,
@@ -579,53 +516,35 @@ class ProgramRepository:
     ) -> None:
         if self.read_only:
             raise PermissionError("Cannot migrate program in read-only mode.")
-        if not self.cursor:
-            raise ConnectionError("Repository not connected.")
-
-        self.cursor.execute(
-            "SELECT migration_history FROM programs WHERE id = ?",
-            (migrant_id,),
-        )
-        row = self.cursor.fetchone()
-        history = (
-            json.loads(row["migration_history"])
-            if row and row["migration_history"]
-            else []
-        )
-        history.append(
-            {
-                "generation": current_generation,
-                "from": source_idx,
-                "to": dest_idx,
-                "timestamp": time.time(),
-            }
-        )
-        self.cursor.execute(
-            """
-            UPDATE programs
-            SET island_idx = ?, migration_history = ?
-            WHERE id = ?
-            """,
-            (dest_idx, json.dumps(history), migrant_id),
-        )
+        with self._session() as session:
+            record = session.get(ProgramRecord, migrant_id)
+            if record is None:
+                return
+            history = list(record.migration_history or [])
+            history.append(
+                {
+                    "generation": current_generation,
+                    "from": source_idx,
+                    "to": dest_idx,
+                    "timestamp": time.time(),
+                }
+            )
+            record.island_idx = dest_idx
+            record.migration_history = history
+            session.commit()
 
     def get_program_brief(self, program_id: str) -> Optional[dict[str, Any]]:
-        if not self.cursor:
-            raise ConnectionError("Repository not connected.")
-        self.cursor.execute(
-            """
-            SELECT combined_score as score, children_count, generation, metadata, complexity
-            FROM programs
-            WHERE id = ?
-            """,
-            (program_id,),
-        )
-        row = self.cursor.fetchone()
-        if not row:
-            return None
-        result = dict(row)
-        result["metadata"] = json.loads(result["metadata"] or "{}")
-        return result
+        with self._session() as session:
+            record = session.get(ProgramRecord, program_id)
+            if record is None:
+                return None
+            return {
+                "score": record.combined_score,
+                "children_count": record.children_count,
+                "generation": record.generation,
+                "metadata": record.program_metadata or {},
+                "complexity": record.complexity,
+            }
 
     def insert_program_copy_from_object(
         self,
@@ -637,55 +556,41 @@ class ProgramRepository:
     ) -> str:
         if self.read_only:
             raise PermissionError("Cannot insert program copy in read-only mode.")
-        if not self.cursor:
-            raise ConnectionError("Repository not connected.")
-
         metadata = dict(program.metadata or {})
         if clear_copy_flag:
             metadata.pop("_needs_island_copies", None)
         metadata.update(metadata_updates)
-
         new_id = str(uuid.uuid4())
-        self.cursor.execute(
-            """
-            INSERT INTO programs
-               (id, code, language, parent_id, archive_inspiration_ids,
-                top_k_inspiration_ids, generation, timestamp, code_diff,
-                combined_score, public_metrics, private_metrics,
-                text_feedback, complexity, embedding, embedding_pca_2d,
-                embedding_pca_3d, embedding_cluster_id, correct,
-                children_count, metadata, island_idx, migration_history,
-                system_prompt_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                       ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                new_id,
-                program.code,
-                program.language,
-                program.parent_id,
-                self._serialize_json(program.archive_inspiration_ids or []),
-                self._serialize_json(program.top_k_inspiration_ids or []),
-                program.generation,
-                program.timestamp,
-                program.code_diff,
-                program.combined_score,
-                self._serialize_json(program.public_metrics or {}),
-                self._serialize_json(program.private_metrics or {}),
-                self._serialize_text_feedback(program.text_feedback),
-                program.complexity,
-                self._serialize_json(program.embedding or []),
-                self._serialize_json(program.embedding_pca_2d or []),
-                self._serialize_json(program.embedding_pca_3d or []),
-                program.embedding_cluster_id,
-                program.correct,
-                program.children_count,
-                self._serialize_json(metadata),
-                island_idx,
-                self._serialize_json(program.migration_history or []),
-                program.system_prompt_id,
-            ),
-        )
+        with self._session() as session:
+            session.add(
+                ProgramRecord(
+                    id=new_id,
+                    code=program.code,
+                    language=program.language,
+                    parent_id=program.parent_id,
+                    archive_inspiration_ids=_clean_nan_values(program.archive_inspiration_ids or []),
+                    top_k_inspiration_ids=_clean_nan_values(program.top_k_inspiration_ids or []),
+                    generation=program.generation,
+                    timestamp=program.timestamp,
+                    code_diff=program.code_diff,
+                    combined_score=program.combined_score,
+                    public_metrics=_clean_nan_values(program.public_metrics or {}),
+                    private_metrics=_clean_nan_values(program.private_metrics or {}),
+                    text_feedback=_normalize_text_feedback(program.text_feedback),
+                    complexity=program.complexity,
+                    embedding=_clean_nan_values(program.embedding or []),
+                    embedding_pca_2d=_clean_nan_values(program.embedding_pca_2d or []),
+                    embedding_pca_3d=_clean_nan_values(program.embedding_pca_3d or []),
+                    embedding_cluster_id=program.embedding_cluster_id,
+                    correct=bool(program.correct),
+                    children_count=program.children_count,
+                    program_metadata=_clean_nan_values(metadata),
+                    island_idx=island_idx,
+                    migration_history=_clean_nan_values(program.migration_history or []),
+                    system_prompt_id=program.system_prompt_id,
+                )
+            )
+            session.commit()
         return new_id
 
     def insert_program_copy_from_row(
@@ -699,64 +604,51 @@ class ProgramRepository:
     ) -> str:
         if self.read_only:
             raise PermissionError("Cannot insert program copy in read-only mode.")
-        if not self.cursor:
-            raise ConnectionError("Repository not connected.")
-
-        raw_metadata = source_program.get("metadata") or "{}"
-        metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else json.loads(raw_metadata)
+        raw_metadata = source_program.get("metadata") or {}
+        metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
         metadata["_spawned_island"] = True
         metadata["_spawned_from_program_id"] = source_program["id"]
         metadata["_spawn_island_idx"] = new_island_idx
         metadata["_spawn_strategy"] = strategy
         if not is_root:
             metadata["_spawned_as_child"] = True
-
         new_id = str(uuid.uuid4())
-        self.cursor.execute(
-            """
-            INSERT INTO programs
-               (id, code, language, parent_id, archive_inspiration_ids,
-                top_k_inspiration_ids, generation, timestamp, code_diff,
-                combined_score, public_metrics, private_metrics,
-                text_feedback, complexity, embedding, embedding_pca_2d,
-                embedding_pca_3d, embedding_cluster_id, correct,
-                children_count, metadata, island_idx, migration_history,
-                system_prompt_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                       ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                new_id,
-                source_program["code"],
-                source_program["language"],
-                new_parent_id,
-                source_program.get("archive_inspiration_ids") or "[]",
-                source_program.get("top_k_inspiration_ids") or "[]",
-                source_program.get("generation", 0),
-                time.time(),
-                None,
-                source_program.get("combined_score"),
-                source_program.get("public_metrics") or "{}",
-                source_program.get("private_metrics") or "{}",
-                source_program.get("text_feedback") or "",
-                source_program.get("complexity"),
-                source_program.get("embedding") or "[]",
-                source_program.get("embedding_pca_2d") or "[]",
-                source_program.get("embedding_pca_3d") or "[]",
-                source_program.get("embedding_cluster_id"),
-                source_program.get("correct", 0),
-                0,
-                json.dumps(metadata),
-                new_island_idx,
-                source_program.get("migration_history") or "[]",
-                source_program.get("system_prompt_id"),
-            ),
-        )
-        if new_parent_id:
-            self.cursor.execute(
-                "UPDATE programs SET children_count = children_count + 1 WHERE id = ?",
-                (new_parent_id,),
+        with self._session() as session:
+            session.add(
+                ProgramRecord(
+                    id=new_id,
+                    code=source_program["code"],
+                    language=source_program["language"],
+                    parent_id=new_parent_id,
+                    archive_inspiration_ids=_clean_nan_values(source_program.get("archive_inspiration_ids") or []),
+                    top_k_inspiration_ids=_clean_nan_values(source_program.get("top_k_inspiration_ids") or []),
+                    generation=source_program.get("generation", 0),
+                    timestamp=time.time(),
+                    code_diff=None,
+                    combined_score=source_program.get("combined_score"),
+                    public_metrics=_clean_nan_values(source_program.get("public_metrics") or {}),
+                    private_metrics=_clean_nan_values(source_program.get("private_metrics") or {}),
+                    text_feedback=_normalize_text_feedback(source_program.get("text_feedback")),
+                    complexity=float(source_program.get("complexity") or 0.0),
+                    embedding=_clean_nan_values(source_program.get("embedding") or []),
+                    embedding_pca_2d=_clean_nan_values(source_program.get("embedding_pca_2d") or []),
+                    embedding_pca_3d=_clean_nan_values(source_program.get("embedding_pca_3d") or []),
+                    embedding_cluster_id=source_program.get("embedding_cluster_id"),
+                    correct=bool(source_program.get("correct", 0)),
+                    children_count=0,
+                    program_metadata=_clean_nan_values(metadata),
+                    island_idx=new_island_idx,
+                    migration_history=_clean_nan_values(source_program.get("migration_history") or []),
+                    system_prompt_id=source_program.get("system_prompt_id"),
+                )
             )
+            if new_parent_id:
+                session.execute(
+                    update(ProgramRecord)
+                    .where(ProgramRecord.id == new_parent_id)
+                    .values(children_count=ProgramRecord.children_count + 1)
+                )
+            session.commit()
         return new_id
 
     def get_correct_child_rows(
@@ -765,17 +657,64 @@ class ProgramRepository:
         *,
         limit: Optional[int] = None,
     ) -> List[dict[str, Any]]:
-        if not self.cursor:
-            raise ConnectionError("Repository not connected.")
-        query = """
-            SELECT * FROM programs
-            WHERE parent_id = ? AND correct = 1
-            ORDER BY combined_score DESC
-        """
-        if limit:
-            query += f" LIMIT {limit}"
-        self.cursor.execute(query, (parent_id,))
-        return [dict(row) for row in self.cursor.fetchall()]
+        query = (
+            self._program_query(correct_only=True, parent_id=parent_id)
+            .order_by(ProgramRecord.combined_score.desc())
+        )
+        if limit is not None:
+            query = query.limit(limit)
+        with self._session() as session:
+            records = session.execute(query).scalars().all()
+        return [self._record_to_program(record).to_dict() for record in records if self._record_to_program(record) is not None]
+
+    def list_embeddings_by_island(
+        self,
+        island_idx: int,
+    ) -> List[tuple[str, list[float]]]:
+        with self._session() as session:
+            rows = session.execute(
+                select(ProgramRecord.id, ProgramRecord.embedding).where(
+                    ProgramRecord.island_idx == island_idx,
+                    ProgramRecord.embedding.is_not(None),
+                )
+            ).all()
+        return [
+            (str(program_id), list(embedding or []))
+            for program_id, embedding in rows
+            if embedding not in (None, [])
+        ]
+
+    def list_all_embeddings(self) -> List[tuple[str, list[float]]]:
+        with self._session() as session:
+            rows = session.execute(
+                select(ProgramRecord.id, ProgramRecord.embedding).where(
+                    ProgramRecord.embedding.is_not(None),
+                )
+            ).all()
+        return [
+            (str(program_id), list(embedding or []))
+            for program_id, embedding in rows
+            if embedding not in (None, [])
+        ]
+
+    def update_embedding_features(
+        self,
+        *,
+        program_id: str,
+        embedding_pca_2d: list[float],
+        embedding_pca_3d: list[float],
+        embedding_cluster_id: int,
+    ) -> None:
+        if self.read_only:
+            raise PermissionError("Cannot update embedding features in read-only mode.")
+        with self._session() as session:
+            record = session.get(ProgramRecord, program_id)
+            if record is None:
+                return
+            record.embedding_pca_2d = _clean_nan_values(embedding_pca_2d)
+            record.embedding_pca_3d = _clean_nan_values(embedding_pca_3d)
+            record.embedding_cluster_id = int(embedding_cluster_id)
+            session.commit()
 
     def commit(self) -> None:
         if self.conn and not self.read_only:
@@ -788,26 +727,12 @@ class ProgramRepository:
     ) -> None:
         if self.read_only:
             raise PermissionError("Cannot update program metadata in read-only mode.")
-        if not self.cursor:
-            raise ConnectionError("Repository not connected.")
-        self.cursor.execute(
-            "UPDATE programs SET metadata = ? WHERE id = ?",
-            (self._serialize_json(metadata), program_id),
-        )
-
-    def _list_programs(
-        self,
-        *,
-        where_sql: str = "",
-        params: Sequence[Any] = (),
-        order_sql: str = "ORDER BY generation ASC, timestamp ASC, id ASC",
-    ) -> List[Program]:
-        if not self.cursor:
-            raise ConnectionError("Repository not connected.")
-        query = f"SELECT * FROM programs {where_sql} {order_sql}".strip()
-        self.cursor.execute(query, tuple(params))
-        rows = self.cursor.fetchall()
-        return [p for p in (self._row_to_program(row) for row in rows) if p is not None]
+        with self._session() as session:
+            record = session.get(ProgramRecord, program_id)
+            if record is None:
+                return
+            record.program_metadata = _clean_nan_values(metadata)
+            session.commit()
 
     def get_best(
         self,
@@ -815,32 +740,25 @@ class ProgramRepository:
         *,
         island_idx: Optional[int] = None,
     ) -> Optional[Program]:
-        """Fetch the current best correct program."""
-        if not self.cursor:
-            raise ConnectionError("Repository not connected.")
-
         programs = self.list_correct(island_idx=island_idx)
         if not programs:
             return None
-
         if metric:
             eligible = [p for p in programs if p.public_metrics and metric in p.public_metrics]
-            sorted_programs = sorted(
+            ranked = sorted(
                 eligible,
                 key=lambda p: p.public_metrics.get(metric, -float("inf")),
                 reverse=True,
             )
         elif any(p.combined_score is not None for p in programs):
-            eligible = [p for p in programs if p.combined_score is not None]
-            sorted_programs = sorted(
-                eligible,
+            ranked = sorted(
+                [p for p in programs if p.combined_score is not None],
                 key=lambda p: p.combined_score or -float("inf"),
                 reverse=True,
             )
         else:
-            eligible = [p for p in programs if p.public_metrics]
-            sorted_programs = sorted(
-                eligible,
+            ranked = sorted(
+                [p for p in programs if p.public_metrics],
                 key=lambda p: (
                     sum(p.public_metrics.values()) / len(p.public_metrics)
                     if p.public_metrics
@@ -848,61 +766,54 @@ class ProgramRepository:
                 ),
                 reverse=True,
             )
-
-        if not sorted_programs:
+        if not ranked:
             return None
-
-        best = sorted_programs[0]
+        best = ranked[0]
         if metric is None and island_idx is None and best.id != self.best_program_id:
             self.best_program_id = best.id
             if not self.read_only:
-                self._update_metadata("best_program_id", self.best_program_id)
+                self._update_metadata("best_program_id", best.id)
         return best
 
     def get_ancestry(self, program_id: str, *, max_ancestors: int = 10) -> List[Program]:
-        """Return ancestor programs ordered oldest-to-newest."""
-        if not self.cursor:
-            raise ConnectionError("Repository not connected.")
-
         ancestors: List[Program] = []
-        current_id = program_id
+        current = self.get(program_id)
         for _ in range(max_ancestors):
-            self.cursor.execute(
-                "SELECT parent_id FROM programs WHERE id = ?",
-                (current_id,),
-            )
-            row = self.cursor.fetchone()
-            if not row or not row["parent_id"]:
+            if current is None or not current.parent_id:
                 break
-            parent = self.get(row["parent_id"])
-            if parent is None:
+            current = self.get(current.parent_id)
+            if current is None:
                 break
-            ancestors.append(parent)
-            current_id = row["parent_id"]
+            ancestors.append(current)
         ancestors.reverse()
         return ancestors
 
     def list_all(self) -> List[Program]:
-        """Return all persisted programs."""
-        return self._list_programs()
+        return self._list_programs(
+            self._program_query().order_by(
+                ProgramRecord.generation.asc(),
+                ProgramRecord.timestamp.asc(),
+                ProgramRecord.id.asc(),
+            )
+        )
 
     def list_correct(self, *, island_idx: Optional[int] = None) -> List[Program]:
-        """Return all correct programs, optionally constrained to one island."""
-        where = "WHERE correct = 1"
-        params: List[Any] = []
-        if island_idx is not None:
-            where += " AND island_idx = ?"
-            params.append(island_idx)
-        return self._list_programs(where_sql=where, params=params)
+        return self._list_programs(
+            self._program_query(correct_only=True, island_idx=island_idx).order_by(
+                ProgramRecord.generation.asc(),
+                ProgramRecord.timestamp.asc(),
+                ProgramRecord.id.asc(),
+            )
+        )
 
     def list_incorrect(self, *, island_idx: Optional[int] = None) -> List[Program]:
-        """Return all incorrect programs, optionally constrained to one island."""
-        where = "WHERE correct = 0"
-        params: List[Any] = []
-        if island_idx is not None:
-            where += " AND island_idx = ?"
-            params.append(island_idx)
-        return self._list_programs(where_sql=where, params=params)
+        return self._list_programs(
+            self._program_query(correct_only=False, island_idx=island_idx).order_by(
+                ProgramRecord.generation.asc(),
+                ProgramRecord.timestamp.asc(),
+                ProgramRecord.id.asc(),
+            )
+        )
 
     def list_by_island(
         self,
@@ -910,15 +821,18 @@ class ProgramRepository:
         *,
         correct_only: bool = False,
     ) -> List[Program]:
-        """Return programs assigned to one island."""
-        where = "WHERE island_idx = ?"
-        params: List[Any] = [island_idx]
-        if correct_only:
-            where += " AND correct = 1"
-        return self._list_programs(where_sql=where, params=params)
+        return self._list_programs(
+            self._program_query(
+                correct_only=True if correct_only else None,
+                island_idx=island_idx,
+            ).order_by(
+                ProgramRecord.generation.asc(),
+                ProgramRecord.timestamp.asc(),
+                ProgramRecord.id.asc(),
+            )
+        )
 
     def list_initialized_islands(self) -> List[Island]:
-        """Return computed initialized islands."""
         if self.island_repo is None:
             raise ConnectionError("Repository island view not initialized.")
         return self.island_repo.list_initialized_islands()
@@ -937,50 +851,41 @@ class ProgramRepository:
         self,
         island_indices: Sequence[int],
     ) -> Dict[int, int]:
-        """Return correct-program counts for a set of islands."""
-        if not self.cursor:
-            raise ConnectionError("Repository not connected.")
         if not island_indices:
             return {}
-        placeholders = ",".join("?" * len(island_indices))
-        self.cursor.execute(
-            f"""
-            SELECT island_idx, COUNT(*) as count
-            FROM programs
-            WHERE island_idx IN ({placeholders}) AND correct = 1
-            GROUP BY island_idx
-            """,
-            tuple(island_indices),
-        )
-        counts = {int(island_idx): 0 for island_idx in island_indices}
-        for row in self.cursor.fetchall():
-            counts[int(row["island_idx"])] = int(row["count"])
+        counts = {int(idx): 0 for idx in island_indices}
+        with self._session() as session:
+            rows = session.execute(
+                select(ProgramRecord.island_idx, func.count())
+                .where(
+                    ProgramRecord.island_idx.in_(list(island_indices)),
+                    ProgramRecord.correct.is_(True),
+                )
+                .group_by(ProgramRecord.island_idx)
+            ).all()
+        for island_idx, count in rows:
+            counts[int(island_idx)] = int(count)
         return counts
 
     def get_island_best_scores(
         self,
         island_indices: Sequence[int],
     ) -> Dict[int, float]:
-        """Return best combined score per island for a set of islands."""
-        if not self.cursor:
-            raise ConnectionError("Repository not connected.")
         if not island_indices:
             return {}
-        placeholders = ",".join("?" * len(island_indices))
-        self.cursor.execute(
-            f"""
-            SELECT island_idx, MAX(combined_score) as best_fitness
-            FROM programs
-            WHERE island_idx IN ({placeholders}) AND correct = 1
-            GROUP BY island_idx
-            """,
-            tuple(island_indices),
-        )
-        scores: Dict[int, float] = {}
-        for row in self.cursor.fetchall():
-            value = row["best_fitness"]
-            scores[int(row["island_idx"])] = float(value) if value is not None else 0.0
-        return scores
+        with self._session() as session:
+            rows = session.execute(
+                select(ProgramRecord.island_idx, func.max(ProgramRecord.combined_score))
+                .where(
+                    ProgramRecord.island_idx.in_(list(island_indices)),
+                    ProgramRecord.correct.is_(True),
+                )
+                .group_by(ProgramRecord.island_idx)
+            ).all()
+        return {
+            int(island_idx): float(score) if score is not None else 0.0
+            for island_idx, score in rows
+        }
 
     def get_earliest(
         self,
@@ -988,19 +893,15 @@ class ProgramRepository:
         correct_only: bool = False,
         island_idx: Optional[int] = None,
     ) -> Optional[Program]:
-        """Return the earliest persisted program matching the requested scope."""
-        where_clauses: List[str] = []
-        params: List[Any] = []
-        if correct_only:
-            where_clauses.append("correct = 1")
-        if island_idx is not None:
-            where_clauses.append("island_idx = ?")
-            params.append(island_idx)
-        where = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
         programs = self._list_programs(
-            where_sql=where,
-            params=params,
-            order_sql="ORDER BY generation ASC, timestamp ASC, id ASC LIMIT 1",
+            self._program_query(
+                correct_only=True if correct_only else None,
+                island_idx=island_idx,
+            ).order_by(
+                ProgramRecord.generation.asc(),
+                ProgramRecord.timestamp.asc(),
+                ProgramRecord.id.asc(),
+            ).limit(1)
         )
         return programs[0] if programs else None
 
@@ -1010,25 +911,26 @@ class ProgramRepository:
         correct_only: bool = False,
         island_idx: Optional[int] = None,
     ) -> Optional[Program]:
-        """Return the most recent persisted program matching the requested scope."""
-        where_clauses: List[str] = []
-        params: List[Any] = []
-        if correct_only:
-            where_clauses.append("correct = 1")
-        if island_idx is not None:
-            where_clauses.append("island_idx = ?")
-            params.append(island_idx)
-        where = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
         programs = self._list_programs(
-            where_sql=where,
-            params=params,
-            order_sql="ORDER BY generation DESC, timestamp DESC, id DESC LIMIT 1",
+            self._program_query(
+                correct_only=True if correct_only else None,
+                island_idx=island_idx,
+            ).order_by(
+                ProgramRecord.generation.desc(),
+                ProgramRecord.timestamp.desc(),
+                ProgramRecord.id.desc(),
+            ).limit(1)
         )
         return programs[0] if programs else None
 
     def list_by_generation(self, generation: int) -> List[Program]:
-        """Return all programs from one generation."""
-        return self._list_programs(where_sql="WHERE generation = ?", params=[generation])
+        return self._list_programs(
+            self._program_query(generation=generation).order_by(
+                ProgramRecord.generation.asc(),
+                ProgramRecord.timestamp.asc(),
+                ProgramRecord.id.asc(),
+            )
+        )
 
     def list_top(
         self,
@@ -1038,52 +940,30 @@ class ProgramRepository:
         correct_only: bool = False,
         island_idx: Optional[int] = None,
     ) -> List[Program]:
-        """Return top programs ordered by the requested metric."""
-        if not self.cursor:
-            raise ConnectionError("Repository not connected.")
-
-        clauses: List[str] = []
-        params: List[Any] = []
-        if correct_only:
-            clauses.append("correct = 1")
-        if island_idx is not None:
-            clauses.append("island_idx = ?")
-            params.append(island_idx)
-        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-
+        base = self._program_query(
+            correct_only=True if correct_only else None,
+            island_idx=island_idx,
+        )
         if metric == "combined_score":
-            query = "SELECT * FROM programs WHERE combined_score IS NOT NULL"
-            if clauses:
-                query += " AND " + " AND ".join(clauses)
-            query += " ORDER BY combined_score DESC LIMIT ?"
-            self.cursor.execute(query, (*params, n))
-            rows = self.cursor.fetchall()
-            return [p for p in (self._row_to_program(row) for row in rows) if p is not None]
-
+            return self._list_programs(
+                base.where(ProgramRecord.combined_score.is_not(None))
+                .order_by(ProgramRecord.combined_score.desc())
+                .limit(n)
+            )
         if metric == "timestamp":
-            query = f"SELECT * FROM programs {where_sql} ORDER BY timestamp DESC LIMIT ?"
-            self.cursor.execute(query, (*params, n))
-            rows = self.cursor.fetchall()
-            return [p for p in (self._row_to_program(row) for row in rows) if p is not None]
-
-        query = f"SELECT * FROM programs {where_sql}"
-        self.cursor.execute(query, tuple(params))
-        rows = self.cursor.fetchall()
-        programs = [p for p in (self._row_to_program(row) for row in rows) if p is not None]
+            return self._list_programs(base.order_by(ProgramRecord.timestamp.desc()).limit(n))
+        programs = self._list_programs(base)
         if not programs:
             return []
-
         if metric:
-            eligible = [p for p in programs if p.public_metrics and metric in p.public_metrics]
-            sorted_programs = sorted(
-                eligible,
+            ranked = sorted(
+                [p for p in programs if p.public_metrics and metric in p.public_metrics],
                 key=lambda p: p.public_metrics.get(metric, -float("inf")),
                 reverse=True,
             )
         else:
-            eligible = [p for p in programs if p.public_metrics]
-            sorted_programs = sorted(
-                eligible,
+            ranked = sorted(
+                [p for p in programs if p.public_metrics],
                 key=lambda p: (
                     sum(p.public_metrics.values()) / len(p.public_metrics)
                     if p.public_metrics
@@ -1091,98 +971,32 @@ class ProgramRepository:
                 ),
                 reverse=True,
             )
-        return sorted_programs[:n]
+        return ranked[:n]
 
     def get_summaries(self) -> List[dict[str, Any]]:
-        """Return lightweight summaries for visualization and polling."""
-        if not self.cursor:
-            raise ConnectionError("Repository not connected.")
-
-        self.cursor.execute(
-            """
-            SELECT
-                p.id,
-                p.parent_id,
-                p.generation,
-                p.timestamp,
-                p.combined_score,
-                p.correct,
-                p.complexity,
-                p.island_idx,
-                p.children_count,
-                p.public_metrics,
-                p.private_metrics,
-                p.metadata,
-                p.embedding_pca_2d,
-                p.embedding_pca_3d,
-                p.embedding_cluster_id,
-                p.language,
-                p.top_k_inspiration_ids,
-                p.archive_inspiration_ids,
-                p.migration_history
-            FROM programs p
-            """
-        )
-        rows = self.cursor.fetchall()
-        summaries: List[dict[str, Any]] = []
-        for row in rows:
-            item = dict(row)
-            for field in ["public_metrics", "private_metrics", "metadata"]:
-                raw = item.get(field)
-                if raw:
-                    try:
-                        item[field] = json.loads(raw)
-                    except json.JSONDecodeError:
-                        item[field] = {}
-                else:
-                    item[field] = {}
-            for field in [
-                "embedding_pca_2d",
-                "embedding_pca_3d",
-                "top_k_inspiration_ids",
-                "archive_inspiration_ids",
-                "migration_history",
-            ]:
-                raw = item.get(field)
-                if raw:
-                    try:
-                        item[field] = json.loads(raw)
-                    except json.JSONDecodeError:
-                        item[field] = []
-                else:
-                    item[field] = []
-            item["in_archive"] = False
-            summaries.append(item)
-        return summaries
+        with self._session() as session:
+            records = session.execute(select(ProgramRecord)).scalars().all()
+        return [self._record_to_summary(record) for record in records]
 
     def get_count_snapshot(self) -> ProgramCountSnapshot:
-        """Return a cheap count/timestamp summary of the repository."""
-        if not self.cursor:
-            raise ConnectionError("Repository not connected.")
-        self.cursor.execute(
-            "SELECT COUNT(*) as count, MAX(timestamp) as max_timestamp FROM programs"
-        )
-        row = self.cursor.fetchone()
-        return ProgramCountSnapshot(
-            count=int(row["count"]) if row else 0,
-            max_timestamp=row["max_timestamp"] if row else None,
-        )
+        with self._session() as session:
+            count, max_timestamp = session.execute(
+                select(func.count(ProgramRecord.id), func.max(ProgramRecord.timestamp))
+            ).one()
+        return ProgramCountSnapshot(count=int(count or 0), max_timestamp=max_timestamp)
 
     @property
     def db(self):
-        """
-        Temporary legacy escape hatch.
-
-        This intentionally exists only to support incremental migration of code
-        paths that still expect `ProgramDatabase`. New code should not use it.
-        """
         from .dbase import ProgramDatabase
 
         return ProgramDatabase(self.config, read_only=self.read_only)
 
     def close(self) -> None:
-        """Close the underlying storage connection."""
         if self.conn:
             self.conn.close()
             self.conn = None
             self.cursor = None
+        if self.engine is not None:
+            self.engine.dispose()
+            self.engine = None
+            self.SessionLocal = None

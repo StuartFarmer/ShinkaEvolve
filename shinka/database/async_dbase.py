@@ -8,12 +8,20 @@ import logging
 import time
 import threading
 import traceback
-from typing import List, Optional, Tuple, Dict, Any
+from typing import TYPE_CHECKING, List, Optional, Tuple, Dict, Any
 from concurrent.futures import ThreadPoolExecutor
 
 from .complexity import analyze_code_metrics
-from .dbase import Program, ProgramDatabase
+from .dbase import Program
+from .archive_policy import create_archive_policy
+from .embedding_feature_service import EmbeddingFeatureService
+from .islands import CombinedIslandManager
+from .program_write_service import ProgramWriteService
 from .repository import ProgramRepository
+from .repository_bundle import RepositoryBundle
+
+if TYPE_CHECKING:
+    from .dbase import ProgramDatabase
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +87,7 @@ class AsyncProgramDatabase:
 
     def __init__(
         self,
-        sync_db: ProgramDatabase,
+        sync_db: "ProgramDatabase",
         max_workers: int = 1,
         embedding_recompute_interval: int = 10,
         enable_deadlock_debugging: bool = False,
@@ -182,22 +190,27 @@ class AsyncProgramDatabase:
 
                 def sample_thread_safe():
                     thread_op_id = self._debug_track_start("sample_thread_safe")
-                    thread_db = None
+                    repo = None
                     try:
-                        # Create a new ProgramDatabase instance for this thread
-                        from .dbase import ProgramDatabase
+                        from shinka.core.context_sampler import ContextSampler
 
-                        thread_db = ProgramDatabase(self.sync_db.config, read_only=True)
-                        if hasattr(thread_db, "set_display_console"):
-                            thread_db.set_display_console(
-                                getattr(self.sync_db, "display_console", None)
-                            )
-                        result = thread_db.sample(
+                        repo = ProgramRepository.from_config(
+                            self.sync_db.config,
+                            read_only=True,
+                        )
+                        sampler = ContextSampler(repo)
+                        sampled = sampler.sample(
                             target_generation=target_generation,
                             novelty_attempt=novelty_attempt,
                             max_novelty_attempts=max_novelty_attempts,
                             resample_attempt=resample_attempt,
                             max_resample_attempts=max_resample_attempts,
+                            with_fix_mode=False,
+                        )
+                        result = (
+                            sampled.parent,
+                            sampled.archive_inspirations,
+                            sampled.top_k_inspirations,
                         )
                         self._debug_track_end(thread_op_id, success=True)
                         return result
@@ -206,9 +219,9 @@ class AsyncProgramDatabase:
                         logger.error(f"Error in sample_thread_safe: {e}")
                         raise
                     finally:
-                        if thread_db:
+                        if repo:
                             try:
-                                thread_db.close()
+                                repo.close()
                             except Exception as e:
                                 logger.warning(f"Error closing thread database: {e}")
 
@@ -249,21 +262,28 @@ class AsyncProgramDatabase:
                     thread_op_id = self._debug_track_start(
                         "sample_with_fix_thread_safe"
                     )
-                    thread_db = None
+                    repo = None
                     try:
-                        from .dbase import ProgramDatabase
+                        from shinka.core.context_sampler import ContextSampler
 
-                        thread_db = ProgramDatabase(self.sync_db.config, read_only=True)
-                        if hasattr(thread_db, "set_display_console"):
-                            thread_db.set_display_console(
-                                getattr(self.sync_db, "display_console", None)
-                            )
-                        result = thread_db.sample_with_fix_mode(
+                        repo = ProgramRepository.from_config(
+                            self.sync_db.config,
+                            read_only=True,
+                        )
+                        sampler = ContextSampler(repo)
+                        sampled = sampler.sample(
                             target_generation=target_generation,
                             novelty_attempt=novelty_attempt,
                             max_novelty_attempts=max_novelty_attempts,
                             resample_attempt=resample_attempt,
                             max_resample_attempts=max_resample_attempts,
+                            with_fix_mode=True,
+                        )
+                        result = (
+                            sampled.parent,
+                            sampled.archive_inspirations,
+                            sampled.top_k_inspirations,
+                            sampled.needs_fix,
                         )
                         self._debug_track_end(thread_op_id, success=True)
                         return result
@@ -272,9 +292,9 @@ class AsyncProgramDatabase:
                         logger.error(f"Error in sample_with_fix_thread_safe: {e}")
                         raise
                     finally:
-                        if thread_db:
+                        if repo:
                             try:
-                                thread_db.close()
+                                repo.close()
                             except Exception as e:
                                 logger.warning(f"Error closing thread database: {e}")
 
@@ -514,57 +534,102 @@ class AsyncProgramDatabase:
             logger.error(f"Error in batch add_programs: {e}")
             raise
 
-    def _add_program_fast(self, program: Program):
-        """Fast program addition that defers expensive operations (deprecated - use async version)."""
-        # Temporarily disable expensive operations in sync database
-        original_embedding_method = self.sync_db._recompute_embeddings_and_clusters
-        self.sync_db._recompute_embeddings_and_clusters = lambda: None
+    def _build_thread_write_service(
+        self,
+        bundle: RepositoryBundle,
+    ) -> ProgramWriteService:
+        island_manager = CombinedIslandManager(
+            num_islands=self.sync_db.config.num_islands,
+            migration_interval=self.sync_db.config.migration_interval,
+            migration_rate=self.sync_db.config.migration_rate,
+            island_elitism=self.sync_db.config.island_elitism,
+            island_spawn_strategy=self.sync_db.config.island_spawn_strategy,
+            island_spawn_subtree_size=self.sync_db.config.island_spawn_subtree_size,
+            program_repository=bundle.programs,
+            island_repository=bundle.islands,
+            archive_policy=create_archive_policy(self.sync_db.config),
+        )
 
-        try:
-            # Add program without expensive operations
-            self.sync_db.add(program, verbose=True)
-        finally:
-            # Restore original methods
-            self.sync_db._recompute_embeddings_and_clusters = original_embedding_method
+        def update_best_metadata(program: Program) -> None:
+            if not program.correct:
+                return
+            current_best = bundle.programs.get_best()
+            if current_best is None or current_best.id != program.id:
+                return
+            score = program.combined_score or 0.0
+            best_score_ever_raw = bundle.programs.get_metadata("best_score_ever")
+            best_score_ever = (
+                float(best_score_ever_raw)
+                if best_score_ever_raw not in (None, "")
+                else None
+            )
+            if best_score_ever is None or score > best_score_ever:
+                bundle.programs.set_metadata("best_score_generation", str(program.generation))
+                bundle.programs.set_metadata("best_score_ever", str(score))
+
+        def maybe_spawn_island(current_generation: int) -> bool:
+            if not self.sync_db.config.enable_dynamic_islands:
+                return False
+            threshold = self.sync_db.config.stagnation_threshold
+            best_gen_raw = bundle.programs.get_metadata("best_score_generation", "0")
+            best_generation = int(best_gen_raw or 0)
+            if current_generation - best_generation < threshold:
+                return False
+            spawned = island_manager.spawn_new_island()
+            if spawned:
+                bundle.programs.set_metadata(
+                    "best_score_generation",
+                    str(current_generation),
+                )
+            return spawned
+
+        return ProgramWriteService(
+            program_repository=bundle.programs,
+            island_manager=island_manager,
+            update_best_program=update_best_metadata,
+            update_metadata=bundle.programs.set_metadata,
+            recompute_embeddings=None,
+            print_program_summary=None,
+            maybe_spawn_island=maybe_spawn_island,
+        )
+
+    def _build_thread_embedding_service(
+        self,
+        bundle: RepositoryBundle,
+    ) -> EmbeddingFeatureService:
+        return EmbeddingFeatureService(
+            bundle.programs,
+            embedding_client_factory=self.sync_db._ensure_embedding_client,
+            read_only=False,
+        )
 
     async def _add_program_fast_async(self, program: Program):
         """Async fast program addition that defers expensive operations."""
 
         def add_program_sync():
-            # Create a new database instance for this thread with full functionality
-            from .dbase import ProgramDatabase
-
-            thread_db = None
+            bundle = None
             try:
-                thread_db = ProgramDatabase(
+                bundle = RepositoryBundle.open(
                     self.sync_db.config,
-                    embedding_model=self.sync_db.embedding_model,
+                    read_only=False,
                 )
-                if hasattr(thread_db, "set_display_console"):
-                    thread_db.set_display_console(
-                        getattr(self.sync_db, "display_console", None)
-                    )
-
-                # Temporarily disable expensive operations
-                original_embedding_method = thread_db._recompute_embeddings_and_clusters
-                thread_db._recompute_embeddings_and_clusters = lambda: None
-
-                try:
-                    # Use the full database add method which includes island assignment
-                    thread_db.add(program, verbose=True)
-                finally:
-                    # Restore original methods
-                    thread_db._recompute_embeddings_and_clusters = (
-                        original_embedding_method
-                    )
-
+                write_service = self._build_thread_write_service(bundle)
+                result = write_service.add(
+                    program,
+                    verbose=False,
+                    current_last_iteration=bundle.programs.last_iteration,
+                )
+                self.sync_db.last_iteration = max(
+                    getattr(self.sync_db, "last_iteration", 0),
+                    result.last_iteration,
+                )
             except Exception as e:
                 logger.error(f"Error in add_program_sync: {e}")
                 raise
             finally:
-                if thread_db:
+                if bundle:
                     try:
-                        thread_db.close()
+                        bundle.close()
                     except Exception as e:
                         logger.warning(
                             f"Error closing thread database in add_program_sync: {e}"
@@ -600,7 +665,7 @@ class AsyncProgramDatabase:
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(
                 self.executor,
-                self.sync_db._recompute_embeddings_and_clusters_thread_safe,
+                self._recompute_embeddings_thread_safe,
             )
 
             self.last_embedding_recompute_time = time.time()
@@ -610,6 +675,24 @@ class AsyncProgramDatabase:
             logger.info("Embedding recomputation task was cancelled")
         except Exception as e:
             logger.error(f"Error in background embedding recomputation: {e}")
+
+    def _recompute_embeddings_thread_safe(self) -> None:
+        bundle = None
+        try:
+            bundle = RepositoryBundle.open(
+                self.sync_db.config,
+                read_only=False,
+            )
+            service = self._build_thread_embedding_service(bundle)
+            service.recompute()
+        finally:
+            if bundle:
+                try:
+                    bundle.close()
+                except Exception as e:
+                    logger.warning(
+                        f"Error closing thread database in embedding recompute: {e}"
+                    )
 
     async def get_async(self, program_id: str) -> Optional[Program]:
         """Async version of get program by ID."""
@@ -894,29 +977,20 @@ class AsyncProgramDatabase:
 
             def compute_percentile_thread_safe():
                 """Thread-safe percentile computation."""
-                thread_db = None
+                repo = None
                 try:
-                    from .dbase import ProgramDatabase
-
-                    thread_db = ProgramDatabase(self.sync_db.config, read_only=True)
-
-                    # Get all scores from correct programs
-                    if correct_only:
-                        thread_db.cursor.execute(
-                            "SELECT combined_score FROM programs "
-                            "WHERE correct = 1 AND combined_score IS NOT NULL"
-                        )
-                    else:
-                        thread_db.cursor.execute(
-                            "SELECT combined_score FROM programs "
-                            "WHERE combined_score IS NOT NULL"
-                        )
-
-                    rows = thread_db.cursor.fetchall()
-                    if not rows:
+                    repo = ProgramRepository.from_config(
+                        self.sync_db.config,
+                        read_only=True,
+                    )
+                    programs = repo.list_correct() if correct_only else repo.list_all()
+                    all_scores = [
+                        p.combined_score
+                        for p in programs
+                        if p.combined_score is not None
+                    ]
+                    if not all_scores:
                         return 0.5  # No programs yet, neutral percentile
-
-                    all_scores = [row[0] for row in rows]
 
                     # Compute percentile: fraction of programs this score beats
                     beats = sum(1 for s in all_scores if score > s)
@@ -927,9 +1001,9 @@ class AsyncProgramDatabase:
                     return percentile
 
                 finally:
-                    if thread_db:
+                    if repo:
                         try:
-                            thread_db.close()
+                            repo.close()
                         except Exception as close_e:
                             logger.warning(f"Error closing thread database: {close_e}")
 

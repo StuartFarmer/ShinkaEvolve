@@ -110,7 +110,8 @@ class NoveltyJudge:
         exec_fname: str,
         code_embedding: List[float],
         parent_program: Program,
-        database,
+        database=None,
+        similarity_provider=None,
     ) -> Tuple[bool, dict]:
         """
         Perform novelty assessment with rejection sampling.
@@ -124,6 +125,12 @@ class NoveltyJudge:
         Returns:
             Tuple of (should_accept, novelty_metadata)
         """
+        similarity_provider = (
+            similarity_provider if similarity_provider is not None else database
+        )
+        if similarity_provider is None:
+            raise ValueError("Novelty assessment requires a similarity provider.")
+
         novelty_metadata = {
             "novelty_checks_performed": 0,
             "novelty_total_cost": 0.0,
@@ -135,7 +142,7 @@ class NoveltyJudge:
         for attempt in range(self.max_novelty_attempts):
             # The actual "novelty test" begins with cosine similarity over code
             # embeddings. This is the first-pass duplicate detector, not the LLM.
-            similarity_scores = database.compute_similarity(
+            similarity_scores = similarity_provider.compute_similarity(
                 code_embedding, parent_program.island_idx
             )
 
@@ -177,7 +184,7 @@ class NoveltyJudge:
                 # want a stronger novelty judge, this is an obvious extension
                 # point: compare against top-k nearest programs or build a
                 # summary of the local neighborhood instead.
-                most_similar_program = database.get_most_similar_program(
+                most_similar_program = similarity_provider.get_most_similar_program(
                     code_embedding, parent_program.island_idx
                 )
 

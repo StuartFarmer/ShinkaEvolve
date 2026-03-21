@@ -50,6 +50,7 @@ dependencies = [
     "httpx==0.27",
     "yfinance (>=1.2.0,<2.0.0)",
     "wandb",
+    "sqlalchemy (>=2.0.48,<3.0.0)",
 ]
 
 [project.scripts]

@@ -3,6 +3,7 @@ import logging
 import sqlite3
 import time
 import warnings
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from functools import wraps
 from pathlib import Path
@@ -13,7 +14,10 @@ from .islands import CombinedIslandManager
 from .island_sampler import create_island_sampler, IslandSampler
 from .island_repository import IslandRepository
 from .metadata_repository import MetadataRepository
+from .embedding_feature_service import EmbeddingFeatureService
 from .program_write_service import ProgramWriteService
+from .repository_bundle import RepositoryBundle
+from .similarity_service import SimilarityService
 from .display import DatabaseDisplay
 from shinka.embed import EmbeddingClient
 from shinka.defaults import default_archive_criteria
@@ -328,74 +332,37 @@ class ProgramDatabase:
         self.island_manager: Optional[CombinedIslandManager] = None
         # Initialize island sampler (will be set after db connection)
         self.island_sampler: Optional[IslandSampler] = None
-
-        db_path_str = getattr(self.config, "db_path", None)
-
-        if db_path_str:
-            db_file = Path(db_path_str).resolve()
-            if not read_only:
-                # Robustness check for unclean shutdown with WAL
-                db_wal_file = Path(f"{db_file}-wal")
-                db_shm_file = Path(f"{db_file}-shm")
-                if (
-                    db_file.exists()
-                    and db_file.stat().st_size == 0
-                    and (db_wal_file.exists() or db_shm_file.exists())
-                ):
-                    logger.warning(
-                        f"Database file {db_file} is empty but WAL/SHM files "
-                        "exist. This may indicate an unclean shutdown. "
-                        "Removing WAL/SHM files to attempt recovery."
-                    )
-                    if db_wal_file.exists():
-                        db_wal_file.unlink()
-                    if db_shm_file.exists():
-                        db_shm_file.unlink()
-                db_file.parent.mkdir(parents=True, exist_ok=True)
-                self.conn = sqlite3.connect(str(db_file), timeout=30.0)
-                logger.debug(f"Connected to SQLite database: {db_file}")
-            else:
-                if not db_file.exists():
-                    raise FileNotFoundError(
-                        f"Database file not found for read-only connection: {db_file}"
-                    )
-                db_uri = f"file:{db_file}?mode=ro"
-                self.conn = sqlite3.connect(db_uri, uri=True, timeout=30.0)
-                logger.debug(
-                    "Connected to SQLite database in read-only mode: %s",
-                    db_file,
-                )
-        else:
-            self.conn = sqlite3.connect(":memory:")
-            logger.info("Initialized in-memory SQLite database.")
-
-        self.conn.row_factory = sqlite3.Row
-        self.cursor = self.conn.cursor()
-        self.metadata_repo = MetadataRepository(
-            conn=self.conn,
-            cursor=self.cursor,
+        self.repository_bundle = RepositoryBundle.open(
+            self.config,
             read_only=self.read_only,
         )
-        if not self.read_only:
-            self._create_tables()
-        from .repository import ProgramRepository
-
-        self.program_repository = ProgramRepository.from_existing_connection(
-            config=self.config,
-            conn=self.conn,
-            cursor=self.cursor,
-            read_only=self.read_only,
-        )
-        self.island_repo = IslandRepository(
-            conn=self.conn,
-            cursor=self.cursor,
-            num_islands=self.config.num_islands,
-        )
+        self.conn = self.repository_bundle.conn
+        self.cursor = self.repository_bundle.cursor
+        self.program_repository = self.repository_bundle.programs
+        self.metadata_repo = self.repository_bundle.metadata
+        self.island_repo = self.repository_bundle.islands
         self._load_metadata_from_db()
 
-        # Initialize island manager now that database is ready
         from .archive_policy import create_archive_policy
 
+        self.archive_policy = create_archive_policy(self.config)
+        self._initialize_runtime_services()
+
+        count = self._count_programs_in_db()
+        logger.debug(f"DB initialized with {count} programs.")
+        logger.debug(
+            f"Last iter: {self.last_iteration}. Best ID: {self.best_program_id}"
+        )
+
+    def _set_repository_bundle(self, bundle: RepositoryBundle) -> None:
+        self.repository_bundle = bundle
+        self.conn = bundle.conn
+        self.cursor = bundle.cursor
+        self.program_repository = bundle.programs
+        self.metadata_repo = bundle.metadata
+        self.island_repo = bundle.islands
+
+    def _initialize_runtime_services(self) -> None:
         self.island_manager = CombinedIslandManager(
             num_islands=self.config.num_islands,
             migration_interval=self.config.migration_interval,
@@ -405,31 +372,52 @@ class ProgramDatabase:
             island_spawn_subtree_size=self.config.island_spawn_subtree_size,
             program_repository=self.program_repository,
             island_repository=self.island_repo,
-            archive_policy=create_archive_policy(self.config),
+            archive_policy=self.archive_policy,
+        )
+        self.similarity_service = SimilarityService(self.program_repository)
+        self.embedding_feature_service = EmbeddingFeatureService(
+            self.program_repository,
+            embedding_client_factory=self._ensure_embedding_client,
+            read_only=self.read_only,
         )
         self.program_write_service = ProgramWriteService(
             program_repository=self.program_repository,
             island_manager=self.island_manager,
             update_best_program=self._update_best_program,
             update_metadata=self._update_metadata_in_db,
-            recompute_embeddings=self._recompute_embeddings_and_clusters,
+            recompute_embeddings=self.embedding_feature_service.recompute,
             print_program_summary=self._print_program_summary,
             maybe_spawn_island=self.check_and_spawn_island_if_stagnant,
         )
-
-        # Initialize island sampler with configured strategy
         self.island_sampler = create_island_sampler(
             cursor=self.cursor,
             conn=self.conn,
             num_islands=self.config.num_islands,
             strategy=self.config.island_selection_strategy,
         )
+        if hasattr(self, "_database_display"):
+            delattr(self, "_database_display")
 
-        count = self._count_programs_in_db()
-        logger.debug(f"DB initialized with {count} programs.")
-        logger.debug(
-            f"Last iter: {self.last_iteration}. Best ID: {self.best_program_id}"
-        )
+    @contextmanager
+    def _open_read_repository(self):
+        bundle = RepositoryBundle.open(self.config, read_only=True)
+        try:
+            yield bundle.programs
+        finally:
+            bundle.close()
+
+    def _get_database_display(self) -> DatabaseDisplay:
+        if not hasattr(self, "_database_display"):
+            self._database_display = DatabaseDisplay(
+                cursor=self.cursor,
+                conn=self.conn,
+                config=self.config,
+                island_manager=self.island_manager,
+                count_programs_func=self._count_programs_in_db,
+                get_best_program_func=lambda: self.program_repository.get_best(),
+                default_console=self.display_console,
+            )
+        return self._database_display
 
     def _ensure_embedding_client(self) -> Optional[EmbeddingClient]:
         """Create embedding client on demand.
@@ -458,126 +446,6 @@ class ProgramDatabase:
 
         return self.embedding_client
 
-    def _create_tables(self):
-        if not self.cursor or not self.conn:
-            raise ConnectionError("DB not connected.")
-
-        # Set SQLite pragmas for better performance and stability
-        # Use WAL mode for better concurrency support and reduced locking
-        self.cursor.execute("PRAGMA journal_mode = WAL;")
-        self.cursor.execute("PRAGMA busy_timeout = 30000;")  # 30 second busy timeout
-        self.cursor.execute(
-            "PRAGMA wal_autocheckpoint = 1000;"
-        )  # Checkpoint every 1000 pages
-        self.cursor.execute("PRAGMA synchronous = NORMAL;")  # Safer, faster
-        self.cursor.execute("PRAGMA cache_size = -64000;")  # 64MB cache
-        self.cursor.execute("PRAGMA temp_store = MEMORY;")
-        self.cursor.execute("PRAGMA foreign_keys = ON;")  # For data integrity
-
-        self.cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS programs (
-                id TEXT PRIMARY KEY,
-                code TEXT NOT NULL,
-                language TEXT NOT NULL,
-                parent_id TEXT,
-                archive_inspiration_ids TEXT,  -- JSON serialized List[str]
-                top_k_inspiration_ids TEXT,    -- JSON serialized List[str]
-                generation INTEGER NOT NULL,
-                timestamp REAL NOT NULL,
-                code_diff TEXT,     -- Stores edit difference
-                combined_score REAL,
-                public_metrics TEXT, -- JSON serialized Dict[str, Any]
-                private_metrics TEXT, -- JSON serialized Dict[str, Any]
-                text_feedback TEXT, -- Text feedback for the program
-                complexity REAL,   -- Calculated complexity metric
-                embedding TEXT,    -- JSON serialized List[float]
-                embedding_pca_2d TEXT, -- JSON serialized List[float]
-                embedding_pca_3d TEXT, -- JSON serialized List[float]
-                embedding_cluster_id INTEGER,
-                correct BOOLEAN DEFAULT 0,  -- Correct (0=False, 1=True)
-                children_count INTEGER NOT NULL DEFAULT 0,
-                metadata TEXT,      -- JSON serialized Dict[str, Any]
-                migration_history TEXT, -- JSON of migration events
-                island_idx INTEGER,  -- Add island_idx to the schema
-                system_prompt_id TEXT  -- ID of system prompt that generated this program
-            )
-            """
-        )
-
-        # Add indices for common query patterns
-        idx_cmds = [
-            "CREATE INDEX IF NOT EXISTS idx_programs_generation ON "
-            "programs(generation)",
-            "CREATE INDEX IF NOT EXISTS idx_programs_timestamp ON programs(timestamp)",
-            "CREATE INDEX IF NOT EXISTS idx_programs_complexity ON "
-            "programs(complexity)",
-            "CREATE INDEX IF NOT EXISTS idx_programs_parent_id ON programs(parent_id)",
-            "CREATE INDEX IF NOT EXISTS idx_programs_children_count ON "
-            "programs(children_count)",
-            "CREATE INDEX IF NOT EXISTS idx_programs_island_idx ON "
-            "programs(island_idx)",
-            "CREATE INDEX IF NOT EXISTS idx_programs_system_prompt_id ON "
-            "programs(system_prompt_id)",
-        ]
-        for cmd in idx_cmds:
-            self.cursor.execute(cmd)
-
-        self.cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS archive (
-                program_id TEXT PRIMARY KEY,
-                FOREIGN KEY (program_id) REFERENCES programs(id)
-                    ON DELETE CASCADE
-            )
-            """
-        )
-
-        if self.metadata_repo is None:
-            raise ConnectionError("Metadata repository not initialized.")
-        self.metadata_repo.ensure_schema()
-
-        self.conn.commit()
-
-        # Run any necessary migrations
-        self._run_migrations()
-
-        logger.debug("Database tables and indices ensured to exist.")
-
-    def _run_migrations(self):
-        """Run database migrations for schema changes."""
-        if not self.cursor or not self.conn:
-            raise ConnectionError("DB not connected.")
-
-        # Get current columns
-        self.cursor.execute("PRAGMA table_info(programs)")
-        columns = [row[1] for row in self.cursor.fetchall()]
-
-        # Migration 1: Add text_feedback column if it doesn't exist
-        try:
-            if "text_feedback" not in columns:
-                logger.info("Adding text_feedback column to programs table")
-                self.cursor.execute(
-                    "ALTER TABLE programs ADD COLUMN text_feedback TEXT DEFAULT ''"
-                )
-                self.conn.commit()
-                logger.info("Successfully added text_feedback column")
-        except sqlite3.Error as e:
-            logger.error(f"Error during text_feedback migration: {e}")
-            # Don't raise - this is not critical for existing functionality
-
-        # Migration 2: Add system_prompt_id column if it doesn't exist
-        try:
-            if "system_prompt_id" not in columns:
-                logger.info("Adding system_prompt_id column to programs table")
-                self.cursor.execute(
-                    "ALTER TABLE programs ADD COLUMN system_prompt_id TEXT"
-                )
-                self.conn.commit()
-                logger.info("Successfully added system_prompt_id column")
-        except sqlite3.Error as e:
-            logger.error(f"Error during system_prompt_id migration: {e}")
-
     @db_retry()
     def _load_metadata_from_db(self):
         if self.metadata_repo is None:
@@ -599,10 +467,9 @@ class ProgramDatabase:
 
     @db_retry()
     def _count_programs_in_db(self) -> int:
-        if not self.cursor:
+        if not getattr(self, "program_repository", None):
             return 0
-        self.cursor.execute("SELECT COUNT(*) FROM programs")
-        return (self.cursor.fetchone() or {"COUNT(*)": 0})["COUNT(*)"]
+        return self.program_repository.get_count_snapshot().count
 
     @db_retry()
     def set_initial_program_count_adjustment(self, adjustment: int):
@@ -647,162 +514,11 @@ class ProgramDatabase:
         self._schedule_migration = False
         return result.program_id
 
-    def _program_from_row(self, row: sqlite3.Row) -> Optional[Program]:
-        """Helper to create a Program object from a database row."""
-        if not row:
-            return None
-
-        program_data = dict(row)
-
-        # Use faster json loads
-        public_metrics_text = program_data.get("public_metrics")
-        if public_metrics_text:
-            try:
-                program_data["public_metrics"] = json.loads(public_metrics_text)
-            except json.JSONDecodeError:
-                program_data["public_metrics"] = {}
-        else:
-            program_data["public_metrics"] = {}
-
-        private_metrics_text = program_data.get("private_metrics")
-        if private_metrics_text:
-            try:
-                program_data["private_metrics"] = json.loads(private_metrics_text)
-            except json.JSONDecodeError:
-                program_data["private_metrics"] = {}
-        else:
-            program_data["private_metrics"] = {}
-
-        # Same for metadata
-        metadata_text = program_data.get("metadata")
-        if metadata_text:
-            try:
-                program_data["metadata"] = json.loads(metadata_text)
-            except json.JSONDecodeError:
-                program_data["metadata"] = {}
-        else:
-            program_data["metadata"] = {}
-
-        # Handle text_feedback (simple string field)
-        if "text_feedback" not in program_data or program_data["text_feedback"] is None:
-            program_data["text_feedback"] = ""
-
-        # Handle inspiration_ids
-        archive_insp_ids_text = program_data.get("archive_inspiration_ids")
-        if archive_insp_ids_text:
-            try:
-                program_data["archive_inspiration_ids"] = json.loads(
-                    archive_insp_ids_text
-                )
-            except json.JSONDecodeError:
-                program_data["archive_inspiration_ids"] = []
-        else:
-            program_data["archive_inspiration_ids"] = []
-
-        top_k_insp_ids_text = program_data.get("top_k_inspiration_ids")
-        if top_k_insp_ids_text:
-            try:
-                program_data["top_k_inspiration_ids"] = json.loads(top_k_insp_ids_text)
-            except json.JSONDecodeError:
-                logger.warning(
-                    "Could not decode top_k_inspiration_ids for "
-                    f"program {program_data.get('id')}. "
-                    "Defaulting to empty list."
-                )
-                program_data["top_k_inspiration_ids"] = []
-        else:
-            program_data["top_k_inspiration_ids"] = []
-
-        # Handle embedding
-        embedding_text = program_data.get("embedding")
-        if embedding_text:
-            try:
-                program_data["embedding"] = json.loads(embedding_text)
-            except json.JSONDecodeError:
-                logger.warning(
-                    f"Could not decode embedding for program "
-                    f"{program_data.get('id')}. Defaulting to empty list."
-                )
-                program_data["embedding"] = []
-        else:
-            program_data["embedding"] = []
-
-        embedding_pca_2d_text = program_data.get("embedding_pca_2d")
-        if embedding_pca_2d_text:
-            try:
-                program_data["embedding_pca_2d"] = json.loads(embedding_pca_2d_text)
-            except json.JSONDecodeError:
-                program_data["embedding_pca_2d"] = []
-        else:
-            program_data["embedding_pca_2d"] = []
-
-        embedding_pca_3d_text = program_data.get("embedding_pca_3d")
-        if embedding_pca_3d_text:
-            try:
-                program_data["embedding_pca_3d"] = json.loads(embedding_pca_3d_text)
-            except json.JSONDecodeError:
-                program_data["embedding_pca_3d"] = []
-        else:
-            program_data["embedding_pca_3d"] = []
-
-        # Handle migration_history
-        migration_history_text = program_data.get("migration_history")
-        if migration_history_text:
-            try:
-                program_data["migration_history"] = json.loads(migration_history_text)
-            except json.JSONDecodeError:
-                logger.warning(
-                    f"Could not decode migration_history for program "
-                    f"{program_data.get('id')}. Defaulting to empty list."
-                )
-                program_data["migration_history"] = []
-        else:
-            program_data["migration_history"] = []
-
-        # Handle archive status
-        program_data["in_archive"] = bool(program_data.get("in_archive", 0))
-
-        return Program.from_dict(program_data)
-
-    def _get_program_internal(self, program_id: str) -> Optional[Program]:
-        if not self.cursor:
-            raise ConnectionError("DB not connected.")
-        self.cursor.execute("SELECT * FROM programs WHERE id = ?", (program_id,))
-        row = self.cursor.fetchone()
-        return self._program_from_row(row)
-
-    def _get_ancestry_internal(
-        self, program_id: str, max_ancestors: int = 10
-    ) -> List[Program]:
-        if not self.cursor:
-            raise ConnectionError("DB not connected.")
-
-        ancestors: List[Program] = []
-        current_id = program_id
-
-        for _ in range(max_ancestors):
-            self.cursor.execute(
-                "SELECT parent_id FROM programs WHERE id = ?", (current_id,)
-            )
-            row = self.cursor.fetchone()
-            if not row or not row["parent_id"]:
-                break
-
-            parent_id = row["parent_id"]
-            parent = self._get_program_internal(parent_id)
-            if parent is None:
-                break
-            ancestors.append(parent)
-            current_id = parent_id
-
-        ancestors.reverse()
-        return ancestors
-
     @db_retry()
     def get(self, program_id: str) -> Optional[Program]:
         """Get a program by its ID."""
         _warn_repository_deprecation("get")
-        return self._get_program_internal(program_id)
+        return self.program_repository.get(program_id)
 
     @db_retry()
     def get_ancestry(self, program_id: str, max_ancestors: int = 10) -> List[Program]:
@@ -817,7 +533,7 @@ class ProgramDatabase:
             List of ancestor programs, sorted chronologically (oldest first)
         """
         _warn_repository_deprecation("get_ancestry")
-        ancestors = self._get_ancestry_internal(
+        ancestors = self.program_repository.get_ancestry(
             program_id=program_id,
             max_ancestors=max_ancestors,
         )
@@ -958,17 +674,9 @@ class ProgramDatabase:
     ):
         """Helper method to print sampling summary."""
         if not hasattr(self, "_database_display"):
-            self._database_display = DatabaseDisplay(
-                cursor=self.cursor,
-                conn=self.conn,
-                config=self.config,
-                island_manager=self.island_manager,
-                count_programs_func=self._count_programs_in_db,
-                get_best_program_func=self._get_best_program_internal,
-                default_console=self.display_console,
-            )
+            self._database_display = self._get_database_display()
 
-        self._database_display.print_sampling_summary(
+        self._get_database_display().print_sampling_summary(
             parent,
             archive_inspirations,
             top_k_inspirations,
@@ -997,15 +705,9 @@ class ProgramDatabase:
                 "Repository-backed context sampling requires config.db_path."
             )
 
-        from .repository import ProgramRepository
         from shinka.core.context_sampler import ContextSampler
 
-        repository = ProgramRepository.from_config(
-            self.config,
-            embedding_model=self.embedding_model,
-            read_only=True,
-        )
-        try:
+        with self._open_read_repository() as repository:
             sampler = ContextSampler(repository)
             return sampler.sample(
                 target_generation=target_generation,
@@ -1015,45 +717,22 @@ class ProgramDatabase:
                 max_resample_attempts=max_resample_attempts,
                 with_fix_mode=with_fix_mode,
             )
-        finally:
-            repository.close()
-
-    def _get_best_program_internal(self, metric: Optional[str] = None) -> Optional[Program]:
-        from .repository import ProgramRepository
-
-        repository = ProgramRepository.from_config(
-            self.config,
-            embedding_model=self.embedding_model,
-            read_only=True,
-        )
-        try:
-            best = repository.get_best(metric=metric)
-            if best is not None and self.best_program_id != best.id:
-                self.best_program_id = best.id
-            return best
-        finally:
-            repository.close()
 
     @db_retry()
     def get_best_program(self, metric: Optional[str] = None) -> Optional[Program]:
         _warn_repository_deprecation("get_best_program")
-        return self._get_best_program_internal(metric=metric)
+        with self._open_read_repository() as repository:
+            best = repository.get_best(metric=metric)
+            if best is not None and self.best_program_id != best.id:
+                self.best_program_id = best.id
+            return best
 
     @db_retry()
     def get_all_programs(self) -> List[Program]:
         """Get all programs from the database."""
         _warn_repository_deprecation("get_all_programs")
-        from .repository import ProgramRepository
-
-        repository = ProgramRepository.from_config(
-            self.config,
-            embedding_model=self.embedding_model,
-            read_only=True,
-        )
-        try:
+        with self._open_read_repository() as repository:
             return repository.list_all()
-        finally:
-            repository.close()
 
     @db_retry()
     def get_programs_summary(self) -> List[Dict[str, Any]]:
@@ -1063,17 +742,8 @@ class ProgramDatabase:
         Returns raw dicts instead of Program objects for efficiency.
         """
         _warn_repository_deprecation("get_programs_summary")
-        from .repository import ProgramRepository
-
-        repository = ProgramRepository.from_config(
-            self.config,
-            embedding_model=self.embedding_model,
-            read_only=True,
-        )
-        try:
+        with self._open_read_repository() as repository:
             return repository.get_summaries()
-        finally:
-            repository.close()
 
     @db_retry()
     def get_program_count_and_timestamp(self) -> Dict[str, Any]:
@@ -1082,34 +752,16 @@ class ProgramDatabase:
         Used by auto-refresh to check if data has changed without loading all programs.
         """
         _warn_repository_deprecation("get_program_count_and_timestamp")
-        from .repository import ProgramRepository
-
-        repository = ProgramRepository.from_config(
-            self.config,
-            embedding_model=self.embedding_model,
-            read_only=True,
-        )
-        try:
+        with self._open_read_repository() as repository:
             snapshot = repository.get_count_snapshot()
             return {"count": snapshot.count, "max_timestamp": snapshot.max_timestamp}
-        finally:
-            repository.close()
 
     @db_retry()
     def get_programs_by_generation(self, generation: int) -> List[Program]:
         """Get all programs from a specific generation."""
         _warn_repository_deprecation("get_programs_by_generation")
-        from .repository import ProgramRepository
-
-        repository = ProgramRepository.from_config(
-            self.config,
-            embedding_model=self.embedding_model,
-            read_only=True,
-        )
-        try:
+        with self._open_read_repository() as repository:
             return repository.list_by_generation(generation)
-        finally:
-            repository.close()
 
     @db_retry()
     def get_top_programs(
@@ -1120,17 +772,8 @@ class ProgramDatabase:
     ) -> List[Program]:
         """Get top programs, using SQL for sorting when possible."""
         _warn_repository_deprecation("get_top_programs")
-        from .repository import ProgramRepository
-
-        repository = ProgramRepository.from_config(
-            self.config,
-            embedding_model=self.embedding_model,
-            read_only=True,
-        )
-        try:
+        with self._open_read_repository() as repository:
             return repository.list_top(n=n, metric=metric, correct_only=correct_only)
-        finally:
-            repository.close()
 
     def save(self, path: Optional[str] = None) -> None:
         if not self.conn or not self.cursor:
@@ -1163,205 +806,23 @@ class ProgramDatabase:
 
     def load(self, path: str) -> None:
         logger.info(f"Loading database from '{path}'...")
-        if self.conn:
+        if self.repository_bundle:
             db_display_name = self.config.db_path or ":memory:"
             logger.info(f"Closing existing connection to '{db_display_name}'.")
-            self.conn.close()
+            self.repository_bundle.close()
 
-        db_path_obj = Path(path).resolve()
-        # Robustness check for unclean shutdown with WAL
-        db_wal_file = Path(f"{db_path_obj}-wal")
-        db_shm_file = Path(f"{db_path_obj}-shm")
-        if (
-            db_path_obj.exists()
-            and db_path_obj.stat().st_size == 0
-            and (db_wal_file.exists() or db_shm_file.exists())
-        ):
-            logger.warning(
-                f"Database file {db_path_obj} is empty but WAL/SHM files "
-                "exist. This may indicate an unclean shutdown. Removing "
-                "WAL/SHM files to attempt recovery.",
-                db_path_obj,
-            )
-            if db_wal_file.exists():
-                db_wal_file.unlink()
-            if db_shm_file.exists():
-                db_shm_file.unlink()
-
-        self.config.db_path = str(db_path_obj)  # Update config
-
-        if not db_path_obj.exists():
-            logger.warning(
-                f"DB file '{db_path_obj}' not found. New DB created if writes occur."
-            )
-            db_path_obj.parent.mkdir(parents=True, exist_ok=True)
-
-        self.conn = sqlite3.connect(str(db_path_obj), timeout=30.0)
-        self.conn.row_factory = sqlite3.Row
-        self.cursor = self.conn.cursor()
-        self._create_tables()
+        self.config.db_path = str(Path(path).resolve())
+        self._set_repository_bundle(
+            RepositoryBundle.open(self.config, read_only=self.read_only)
+        )
         self._load_metadata_from_db()
+        self._initialize_runtime_services()
 
         count = self._count_programs_in_db()
         logger.info(
             f"Loaded DB from '{db_path_obj}'. {count} programs. "
             f"Last iter: {self.last_iteration}."
         )
-
-    def _get_criterion_value(self, program: Program, criterion: str) -> float:
-        """
-        Get the value of a specific criterion for a program.
-
-        Supported criteria:
-            - combined_score: The program's combined fitness score
-            - loc: Lines of code
-            - lloc: Logical lines of code
-            - complexity: Cyclomatic complexity
-            - maintainability: Maintainability index
-            - nesting: Maximum nesting depth
-        """
-        if criterion == "combined_score":
-            return program.combined_score or 0.0
-
-        # Get code analysis metrics from metadata
-        metrics = {}
-        if program.metadata:
-            metrics = program.metadata.get("code_analysis_metrics", {})
-
-        if criterion == "loc":
-            return metrics.get(
-                "lines_of_code", len(program.code.split("\n")) if program.code else 1
-            )
-        elif criterion == "lloc":
-            return metrics.get(
-                "logical_lines_of_code",
-                len(program.code.split("\n")) if program.code else 1,
-            )
-        elif criterion == "complexity":
-            return metrics.get("cyclomatic_complexity", 1.0)
-        elif criterion == "maintainability":
-            return metrics.get("maintainability_index", 100.0)
-        elif criterion == "nesting":
-            return metrics.get("max_nesting_depth", 1)
-
-        # Unknown criterion - return 0
-        logger.warning(f"Unknown archive criterion: {criterion}")
-        return 0.0
-
-    def _compute_archive_score_ranked(
-        self, program: Program, archive_programs: List[Program]
-    ) -> float:
-        """
-        Compute score using rank-based normalization for scale-invariant comparison.
-
-        Each criterion is converted to a percentile rank (0-1) based on the
-        archive population, then weighted according to archive_criteria config.
-
-        Args:
-            program: The program to score
-            archive_programs: Current archive programs for rank computation
-
-        Returns:
-            Combined score where higher is always better
-        """
-        criteria = getattr(self.config, "archive_criteria", {"combined_score": 1.0})
-
-        if not archive_programs:
-            # No archive yet - just use the primary criterion
-            primary_criterion = next(iter(criteria.keys()), "combined_score")
-            primary_weight = criteria.get(primary_criterion, 1.0)
-            value = self._get_criterion_value(program, primary_criterion)
-            return value if primary_weight > 0 else -value
-
-        all_programs = archive_programs + [program]
-
-        score = 0.0
-        for criterion, weight in criteria.items():
-            # Get values for all programs
-            values = [self._get_criterion_value(p, criterion) for p in all_programs]
-            program_value = values[-1]  # The new program's value
-
-            # Compute percentile rank (0 = worst, 1 = best)
-            if weight > 0:
-                # Higher is better: count how many are strictly worse
-                rank = sum(1 for v in values if v < program_value) / len(values)
-            else:
-                # Lower is better: count how many are strictly worse (i.e., higher)
-                rank = sum(1 for v in values if v > program_value) / len(values)
-                weight = abs(weight)  # Use absolute weight after handling direction
-
-            score += weight * rank
-
-        return score
-
-    def _get_archive_programs(self) -> List[Program]:
-        """Deprecated persisted archive view. Computes archive from programs."""
-        logger.debug(
-            "ProgramDatabase._get_archive_programs() is deprecated; computing archive from persisted programs."
-        )
-        from .archive_policy import create_archive_policy
-        from .repository import ProgramRepository
-
-        policy = create_archive_policy(self.config)
-        repository = ProgramRepository.from_config(
-            self.config,
-            embedding_model=self.embedding_model,
-            read_only=True,
-        )
-        try:
-            return policy.compute(repository.list_all())
-        finally:
-            repository.close()
-
-    def _find_most_similar_in_archive(
-        self, embedding: List[float]
-    ) -> Optional[Program]:
-        """
-        Find the most similar program in the archive by embedding cosine similarity.
-        Used for crowding-based archive selection.
-
-        Args:
-            embedding: The embedding vector to compare against
-
-        Returns:
-            The most similar program, or None if no valid comparisons possible
-        """
-        if not embedding:
-            return None
-
-        archive_programs = self._get_archive_programs()
-        if not archive_programs:
-            return None
-
-        best_similarity = -float("inf")
-        most_similar = None
-
-        embedding_arr = np.array(embedding)
-        embedding_norm = np.linalg.norm(embedding_arr)
-
-        if embedding_norm < 1e-8:
-            return None
-
-        for prog in archive_programs:
-            if not prog or not prog.embedding:
-                continue
-
-            prog_embedding = np.array(prog.embedding)
-            prog_norm = np.linalg.norm(prog_embedding)
-
-            if prog_norm < 1e-8:
-                continue
-
-            # Cosine similarity
-            similarity = np.dot(embedding_arr, prog_embedding) / (
-                embedding_norm * prog_norm
-            )
-
-            if similarity > best_similarity:
-                best_similarity = similarity
-                most_similar = prog
-
-        return most_similar
 
     def _is_better(
         self,
@@ -1382,59 +843,11 @@ class ProgramDatabase:
         Returns:
             True if program1 is better than program2
         """
-        # First prioritize correctness (always)
-        if program1.correct and not program2.correct:
-            return True
-        if program2.correct and not program1.correct:
-            return False
-
-        # Check if we should use multi-criteria ranked scoring
-        criteria = getattr(self.config, "archive_criteria", {"combined_score": 1.0})
-        use_ranked = archive_programs is not None and len(criteria) > 1
-
-        if use_ranked:
-            # Use rank-based scoring with archive context
-            # Include both programs for fair ranking
-            context = [
-                p for p in archive_programs if p.id not in (program1.id, program2.id)
-            ]
-            s1 = self._compute_archive_score_ranked(program1, context)
-            s2 = self._compute_archive_score_ranked(program2, context)
-
-            if s1 != s2:
-                return s1 > s2
-        else:
-            # Simple single-criterion comparison (original behavior)
-            s1 = program1.combined_score
-            s2 = program2.combined_score
-
-            if s1 is not None and s2 is not None:
-                if s1 != s2:
-                    return s1 > s2
-            elif s1 is not None:
-                return True  # p1 has score, p2 doesn't
-            elif s2 is not None:
-                return False  # p2 has score, p1 doesn't
-
-            # Fallback to average public metrics
-            try:
-                avg1 = (
-                    sum(program1.public_metrics.values()) / len(program1.public_metrics)
-                    if program1.public_metrics
-                    else -float("inf")
-                )
-                avg2 = (
-                    sum(program2.public_metrics.values()) / len(program2.public_metrics)
-                    if program2.public_metrics
-                    else -float("inf")
-                )
-                if avg1 != avg2:
-                    return avg1 > avg2
-            except Exception:
-                pass
-
-        # Tie-breaker: prefer newer programs
-        return program1.timestamp > program2.timestamp
+        return self.archive_policy._is_better(
+            program1,
+            program2,
+            archive_programs=archive_programs,
+        )
 
     @db_retry()
     def _update_archive(self, program: Program) -> None:
@@ -1467,8 +880,8 @@ class ProgramDatabase:
             return
 
         current_best_p = None
-        if self.best_program_id:
-            current_best_p = self._get_program_internal(self.best_program_id)
+        if self.best_program_id and getattr(self, "program_repository", None):
+            current_best_p = self.program_repository.get(self.best_program_id)
 
         if current_best_p is None or self._is_better(program, current_best_p):
             self.best_program_id = program.id
@@ -1506,15 +919,7 @@ class ProgramDatabase:
     def print_summary(self, console=None) -> None:
         """Print a summary of the database contents using DatabaseDisplay."""
         if not hasattr(self, "_database_display"):
-            self._database_display = DatabaseDisplay(
-                cursor=self.cursor,
-                conn=self.conn,
-                config=self.config,
-                island_manager=self.island_manager,
-                count_programs_func=self._count_programs_in_db,
-                get_best_program_func=self._get_best_program_internal,
-                default_console=self.display_console,
-            )
+            self._database_display = self._get_database_display()
             self._database_display.set_last_iteration(self.last_iteration)
 
         if hasattr(self._database_display, "set_default_console"):
@@ -1524,15 +929,7 @@ class ProgramDatabase:
     def _print_program_summary(self, program) -> None:
         """Print a rich summary of a newly added program using DatabaseDisplay."""
         if not hasattr(self, "_database_display"):
-            self._database_display = DatabaseDisplay(
-                cursor=self.cursor,
-                conn=self.conn,
-                config=self.config,
-                island_manager=self.island_manager,
-                count_programs_func=self._count_programs_in_db,
-                get_best_program_func=self._get_best_program_internal,
-                default_console=self.display_console,
-            )
+            self._database_display = self._get_database_display()
 
         if hasattr(self._database_display, "set_default_console"):
             self._database_display.set_default_console(self.display_console)
@@ -1607,472 +1004,18 @@ class ProgramDatabase:
 
     def close(self):
         """Closes the database connection."""
-        if self.conn:
-            self.conn.close()
-
-    def _cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
-        """Compute cosine similarity between two vectors."""
-        if not vec1 or not vec2 or len(vec1) != len(vec2):
-            return 0.0
-
-        arr1 = np.array(vec1, dtype=np.float32)
-        arr2 = np.array(vec2, dtype=np.float32)
-
-        norm_a = np.linalg.norm(arr1)
-        norm_b = np.linalg.norm(arr2)
-
-        if norm_a == 0 or norm_b == 0:
-            return 0.0
-
-        similarity = np.dot(arr1, arr2) / (norm_a * norm_b)
-        return float(similarity)
-
-    @db_retry()
-    def compute_similarity_thread_safe(
-        self, vec: List[float], island_idx: int
-    ) -> List[float]:
-        """
-        Thread-safe version of similarity computation. Creates its own DB connection.
-        """
-        conn = None
-        try:
-            # Create a new connection for this thread
-            conn = sqlite3.connect(
-                self.config.db_path, check_same_thread=False, timeout=60.0
-            )
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-
-            cursor.execute(
-                "SELECT embedding FROM programs WHERE island_idx = ? AND embedding IS NOT NULL AND embedding != '[]'",
-                (island_idx,),
-            )
-            rows = cursor.fetchall()
-
-            if not rows:
-                return []
-
-            similarities = []
-            for row in rows:
-                db_embedding = json.loads(row["embedding"])
-                if db_embedding:
-                    sim = self._cosine_similarity(vec, db_embedding)
-                    similarities.append(sim)
-            return similarities
-
-        except Exception as e:
-            logger.error(f"Thread-safe similarity computation failed: {e}")
-            raise
-        finally:
-            if conn:
-                conn.close()
-
-    @db_retry()
-    def compute_similarity(
-        self, code_embedding: List[float], island_idx: int
-    ) -> List[float]:
-        """
-        Compute cosine similarity against stored code embeddings in one island.
-
-        This is the primary novelty test used by `NoveltyJudge`.
-        Nothing semantic happens here; it is purely an embedding-nearest-neighbor
-        lookup. The novelty gate later compares `max(similarities)` against
-        `EvolutionConfig.code_embed_sim_threshold`.
-
-        Args:
-            code_embedding: The embedding to compare against
-            island_idx: The island index to constrain the search to
-
-        Returns:
-            List of similarity scores (cosine similarity between 0 and 1)
-        """
-        if not self.cursor:
-            raise ConnectionError("DB not connected.")
-
-        if not code_embedding:
-            logger.warning("Empty code embedding provided to compute_similarity")
-            return []
-
-        # Novelty is intentionally local to the island, not global to the whole
-        # run. That allows different islands to explore similar ideas without
-        # immediately rejecting each other as duplicates.
-        self.cursor.execute(
-            """
-            SELECT id, embedding FROM programs 
-            WHERE island_idx = ? AND embedding IS NOT NULL AND embedding != '[]'
-            """,
-            (island_idx,),
-        )
-        rows = self.cursor.fetchall()
-
-        if not rows:
-            logger.debug(f"No programs with embeddings found in island {island_idx}")
-            return []
-
-        # Extract embeddings and compute similarities
-        similarity_scores = []
-        for row in rows:
-            try:
-                embedding = json.loads(row["embedding"])
-                if embedding:  # Skip empty embeddings
-                    similarity = self._cosine_similarity(code_embedding, embedding)
-                    similarity_scores.append(similarity)
-                else:
-                    similarity_scores.append(0.0)
-            except json.JSONDecodeError:
-                logger.warning(f"Could not decode embedding for program {row['id']}")
-                similarity_scores.append(0.0)
-                continue
-
-        logger.debug(
-            f"Computed {len(similarity_scores)} similarity scores for "
-            f"island {island_idx}"
-        )
-        return similarity_scores
-
-    @db_retry()
-    def get_most_similar_program(
-        self, code_embedding: List[float], island_idx: int
-    ) -> Optional[Program]:
-        """
-        Get the nearest embedded neighbor in the current island.
-
-        This is used only when embedding similarity already says "too close" and
-        the optional novelty LLM needs an exact comparison target.
-
-        Args:
-            code_embedding: The embedding to compare against
-            island_idx: The island index to constrain the search to
-
-        Returns:
-            The most similar Program object, or None if no programs found
-        """
-        if not self.cursor:
-            raise ConnectionError("DB not connected.")
-
-        if not code_embedding:
-            logger.warning("Empty code embedding provided to get_most_similar_program")
-            return None
-
-        # Get all programs in the specified island that have embeddings
-        self.cursor.execute(
-            """
-            SELECT id, embedding FROM programs 
-            WHERE island_idx = ? AND embedding IS NOT NULL AND embedding != '[]'
-            """,
-            (island_idx,),
-        )
-        rows = self.cursor.fetchall()
-
-        if not rows:
-            logger.debug(f"No programs with embeddings found in island {island_idx}")
-            return None
-
-        # Find the program with highest similarity
-        max_similarity = -1.0
-        most_similar_id = None
-
-        for row in rows:
-            try:
-                embedding = json.loads(row["embedding"])
-                if embedding:  # Skip empty embeddings
-                    similarity = self._cosine_similarity(code_embedding, embedding)
-                    if similarity > max_similarity:
-                        max_similarity = similarity
-                        most_similar_id = row["id"]
-            except json.JSONDecodeError:
-                logger.warning(f"Could not decode embedding for program {row['id']}")
-                continue
-
-        if most_similar_id:
-            return self._get_program_internal(most_similar_id)
-        return None
-
-    @db_retry()
-    def get_most_similar_program_thread_safe(
-        self, code_embedding: List[float], island_idx: int
-    ) -> Optional[Program]:
-        """
-        Thread-safe version of get_most_similar_program that creates its own DB connection.
-
-        Args:
-            code_embedding: The embedding to compare against
-            island_idx: The island index to constrain the search to
-
-        Returns:
-            The most similar Program object, or None if not found
-        """
-        if not code_embedding:
-            logger.warning(
-                "Empty code embedding provided to get_most_similar_program_thread_safe"
-            )
-            return None
-
-        conn = None
-        try:
-            # Create a new connection for this thread
-            conn = sqlite3.connect(
-                self.config.db_path, check_same_thread=False, timeout=60.0
-            )
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-
-            # Get all programs in the specified island that have embeddings
-            cursor.execute(
-                """
-                SELECT id, embedding FROM programs 
-                WHERE island_idx = ? AND embedding IS NOT NULL AND embedding != '[]'
-                """,
-                (island_idx,),
-            )
-
-            rows = cursor.fetchall()
-            if not rows:
-                return None
-
-            # Compute similarities
-            import numpy as np
-
-            similarities = []
-            program_ids = []
-
-            for row in rows:
-                try:
-                    embedding = json.loads(row["embedding"])
-                    if embedding:  # Check if embedding is not empty
-                        similarity = np.dot(code_embedding, embedding) / (
-                            np.linalg.norm(code_embedding) * np.linalg.norm(embedding)
-                        )
-                        similarities.append(similarity)
-                        program_ids.append(row["id"])
-                except (json.JSONDecodeError, ValueError, ZeroDivisionError) as e:
-                    logger.warning(
-                        f"Error computing similarity for program {row['id']}: {e}"
-                    )
-                    continue
-
-            if not similarities:
-                return None
-
-            # Find the most similar program
-            max_similarity_idx = np.argmax(similarities)
-            most_similar_id = program_ids[max_similarity_idx]
-
-            # Get the full program data
-            cursor.execute("SELECT * FROM programs WHERE id = ?", (most_similar_id,))
-            row = cursor.fetchone()
-
-            if row:
-                return self._program_from_row(row)
-            return None
-
-        except Exception as e:
-            logger.error(f"Error in get_most_similar_program_thread_safe: {e}")
-            return None
-        finally:
-            if conn:
-                conn.close()
-
-    @db_retry()
-    def _recompute_embeddings_and_clusters(self, num_clusters: int = 4):
-        if self.read_only:
-            return
-        if not self.cursor or not self.conn:
-            raise ConnectionError("DB not connected.")
-
-        self.cursor.execute(
-            "SELECT id, embedding FROM programs "
-            "WHERE embedding IS NOT NULL AND embedding != '[]'"
-        )
-        rows = self.cursor.fetchall()
-
-        if len(rows) < num_clusters:
-            logger.info(
-                f"Not enough programs with embeddings ({len(rows)}) to "
-                f"perform clustering. Need at least {num_clusters}."
-            )
-            return
-
-        program_ids = [row["id"] for row in rows]
-        embeddings = [json.loads(row["embedding"]) for row in rows]
-        embedding_client = self._ensure_embedding_client()
-        if embedding_client is None:
-            return
-
-        # Use EmbeddingClient for dim reduction and clustering
-        try:
-            logger.info(
-                "Recomputing PCA-reduced embedding features for %s programs.",
-                len(program_ids),
-            )
-            reduced_2d = embedding_client.get_dim_reduction(
-                embeddings, method="pca", dims=2
-            )
-            reduced_3d = embedding_client.get_dim_reduction(
-                embeddings, method="pca", dims=3
-            )
-            cluster_ids = embedding_client.get_embedding_clusters(
-                embeddings, num_clusters=num_clusters
-            )
-        except Exception as e:
-            logger.error(f"Failed to recompute embedding features: {e}")
-            return
-
-        # Update all programs in a single transaction
-        self.conn.execute("BEGIN TRANSACTION")
-        try:
-            for i, program_id in enumerate(program_ids):
-                embedding_pca_2d_json = json.dumps(reduced_2d[i].tolist())
-                embedding_pca_3d_json = json.dumps(reduced_3d[i].tolist())
-                cluster_id = int(cluster_ids[i])
-
-                self.cursor.execute(
-                    """
-                    UPDATE programs
-                    SET embedding_pca_2d = ?,
-                        embedding_pca_3d = ?,
-                        embedding_cluster_id = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        embedding_pca_2d_json,
-                        embedding_pca_3d_json,
-                        cluster_id,
-                        program_id,
-                    ),
-                )
-            self.conn.commit()
-            logger.info(
-                "Successfully updated embedding features for %s programs.",
-                len(program_ids),
-            )
-        except Exception as e:
-            self.conn.rollback()
-            logger.error("Failed to update programs with new embedding features: %s", e)
-
-    @db_retry()
-    def _recompute_embeddings_and_clusters_thread_safe(self, num_clusters: int = 4):
-        """
-        Thread-safe version of embedding recomputation. Creates its own DB connection.
-        """
-        if self.read_only:
-            return
-
-        conn = None
-        try:
-            # Create a new connection for this thread
-            conn = sqlite3.connect(
-                self.config.db_path, check_same_thread=False, timeout=60.0
-            )
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-
-            cursor.execute(
-                "SELECT id, embedding FROM programs "
-                "WHERE embedding IS NOT NULL AND embedding != '[]'"
-            )
-            rows = cursor.fetchall()
-
-            if len(rows) < num_clusters:
-                if len(rows) > 0:
-                    logger.info(
-                        f"Not enough programs with embeddings ({len(rows)}) to "
-                        f"perform clustering. Need at least {num_clusters}."
-                    )
-                return
-
-            program_ids = [row["id"] for row in rows]
-            embeddings = [json.loads(row["embedding"]) for row in rows]
-            embedding_client = self._ensure_embedding_client()
-            if embedding_client is None:
-                return
-
-            # Use EmbeddingClient for dim reduction and clustering
-            try:
-                logger.info(
-                    "Recomputing PCA-reduced embedding features for %s programs.",
-                    len(program_ids),
-                )
-
-                logger.info("Computing 2D PCA reduction...")
-                reduced_2d = embedding_client.get_dim_reduction(
-                    embeddings, method="pca", dims=2
-                )
-                logger.info("2D PCA reduction completed")
-
-                logger.info("Computing 3D PCA reduction...")
-                reduced_3d = embedding_client.get_dim_reduction(
-                    embeddings, method="pca", dims=3
-                )
-                logger.info("3D PCA reduction completed")
-
-                logger.info(f"Computing GMM clustering with {num_clusters} clusters...")
-                cluster_ids = embedding_client.get_embedding_clusters(
-                    embeddings, num_clusters=num_clusters
-                )
-                logger.info("GMM clustering completed")
-            except Exception as e:
-                logger.error(f"Failed to recompute embedding features: {e}")
-                return
-
-            # Update all programs in a single transaction
-            conn.execute("BEGIN TRANSACTION")
-            try:
-                for i, program_id in enumerate(program_ids):
-                    embedding_pca_2d_json = json.dumps(reduced_2d[i].tolist())
-                    embedding_pca_3d_json = json.dumps(reduced_3d[i].tolist())
-                    cluster_id = int(cluster_ids[i])
-
-                    cursor.execute(
-                        """
-                        UPDATE programs
-                        SET embedding_pca_2d = ?,
-                            embedding_pca_3d = ?,
-                            embedding_cluster_id = ?
-                        WHERE id = ?
-                        """,
-                        (
-                            embedding_pca_2d_json,
-                            embedding_pca_3d_json,
-                            cluster_id,
-                            program_id,
-                        ),
-                    )
-                conn.commit()
-                logger.info(
-                    "Successfully updated embedding features for %s programs.",
-                    len(program_ids),
-                )
-            except Exception as e:
-                conn.rollback()
-                logger.error(
-                    "Failed to update programs with new embedding features: %s", e
-                )
-                raise  # Re-raise exception
-
-        except Exception as e:
-            logger.error(f"Thread-safe embedding recomputation failed: {e}")
-            raise  # Re-raise exception
-
-        finally:
-            if conn:
-                conn.close()
+        if self.repository_bundle:
+            self.repository_bundle.close()
+            self.repository_bundle = None
+        self.conn = None
+        self.cursor = None
 
     @db_retry()
     def get_programs_by_generation_thread_safe(self, generation: int) -> List[Program]:
         """Thread-safe version of get_programs_by_generation."""
         _warn_repository_deprecation("get_programs_by_generation_thread_safe")
-        from .repository import ProgramRepository
-
-        repository = ProgramRepository.from_config(
-            self.config,
-            embedding_model=self.embedding_model,
-            read_only=True,
-        )
-        try:
+        with self._open_read_repository() as repository:
             return repository.list_by_generation(generation)
-        finally:
-            repository.close()
 
     @db_retry()
     def get_top_programs_thread_safe(
@@ -2082,19 +1025,5 @@ class ProgramDatabase:
     ) -> List[Program]:
         """Thread-safe version of get_top_programs."""
         _warn_repository_deprecation("get_top_programs_thread_safe")
-        from .repository import ProgramRepository
-
-        repository = ProgramRepository.from_config(
-            self.config,
-            embedding_model=self.embedding_model,
-            read_only=True,
-        )
-        try:
+        with self._open_read_repository() as repository:
             return repository.list_top(n=n, correct_only=correct_only)
-        finally:
-            repository.close()
-
-    def _get_programs_for_island(self, island_idx: int) -> List[Program]:
-        """
-        Get all programs for a specific island.
-        """

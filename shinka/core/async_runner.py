@@ -396,6 +396,7 @@ class ShinkaEvolveRunner:
             self.novelty_judge = AsyncNoveltyJudge(
                 sync_novelty_judge,
                 novelty_llm,
+                db_config=db_config,
             )
         else:
             self.novelty_judge = None

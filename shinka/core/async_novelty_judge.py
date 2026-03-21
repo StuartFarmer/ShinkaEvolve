@@ -9,6 +9,8 @@ from typing import List, Optional, Dict, Any, Tuple
 from .novelty_judge import NoveltyJudge
 from ..llm import AsyncLLMClient
 from ..database import Program
+from ..database.repository import ProgramRepository
+from ..database.similarity_service import SimilarityService
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +35,8 @@ class AsyncNoveltyJudge:
         self,
         sync_novelty_judge: NoveltyJudge,
         async_llm_client: Optional[AsyncLLMClient] = None,
+        *,
+        db_config=None,
     ):
         """Initialize with existing sync novelty judge.
 
@@ -42,6 +46,7 @@ class AsyncNoveltyJudge:
         """
         self.sync_judge = sync_novelty_judge
         self.async_llm_client = async_llm_client
+        self.db_config = db_config
 
     async def should_check_novelty_async(
         self, code_embedding: List[float], current_gen: int, parent_program: Program, db
@@ -109,7 +114,7 @@ class AsyncNoveltyJudge:
             loop = asyncio.get_event_loop()
             similarity_scores = await loop.run_in_executor(
                 None,
-                db.compute_similarity_thread_safe,
+                self._compute_similarity_thread_safe,
                 code_embedding,
                 parent_program.island_idx,
             )
@@ -147,7 +152,7 @@ class AsyncNoveltyJudge:
                 loop = asyncio.get_event_loop()
                 most_similar_program = await loop.run_in_executor(
                     None,
-                    db.get_most_similar_program_thread_safe,
+                    self._get_most_similar_program_thread_safe,
                     code_embedding,
                     parent_program.island_idx,
                 )
@@ -199,6 +204,34 @@ class AsyncNoveltyJudge:
         except Exception as e:
             logger.error(f"Error in async novelty assessment: {e}")
             return True, {"novelty_checks_performed": 0, "novelty_total_cost": 0.0}
+
+    def _compute_similarity_thread_safe(
+        self, code_embedding: List[float], island_idx: int
+    ) -> List[float]:
+        if self.db_config is None:
+            return []
+        repository = ProgramRepository.from_config(self.db_config, read_only=True)
+        try:
+            return SimilarityService(repository).compute_similarity(
+                code_embedding,
+                island_idx,
+            )
+        finally:
+            repository.close()
+
+    def _get_most_similar_program_thread_safe(
+        self, code_embedding: List[float], island_idx: int
+    ) -> Optional[Program]:
+        if self.db_config is None:
+            return None
+        repository = ProgramRepository.from_config(self.db_config, read_only=True)
+        try:
+            return SimilarityService(repository).get_most_similar_program(
+                code_embedding,
+                island_idx,
+            )
+        finally:
+            repository.close()
 
     async def _check_llm_novelty_async(
         self, proposed_code: str, most_similar_program: Program

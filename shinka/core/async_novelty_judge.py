@@ -14,7 +14,20 @@ logger = logging.getLogger(__name__)
 
 
 class AsyncNoveltyJudge:
-    """Async version of NoveltyJudge for concurrent novelty assessment."""
+    """
+    Async adapter around `NoveltyJudge`.
+
+    The underlying policy is intentionally kept in the sync judge so the async
+    and sync runners share the same semantics. This wrapper mainly solves two
+    operational constraints:
+
+    - SQLite access must be handled carefully across threads/processes.
+    - LLM novelty calls should not block the async proposal loop.
+
+    If you want to change novelty policy, prefer editing/subclassing
+    `NoveltyJudge`. If you want to change concurrency behavior, extend this
+    wrapper instead.
+    """
 
     def __init__(
         self,
@@ -86,7 +99,10 @@ class AsyncNoveltyJudge:
         }
 
         try:
-            # Compute similarities with programs in island (same as sync version)
+            # The async path uses the same novelty policy as the sync version:
+            # embedding gate first, optional LLM semantic tie-break second.
+            # The only difference is that DB access is routed through
+            # thread-safe helpers because SQLite cursors are thread-bound.
             if parent_program.island_idx is None:
                 return True, novelty_metadata
 
@@ -114,7 +130,7 @@ class AsyncNoveltyJudge:
             novelty_metadata["max_similarity"] = max_similarity
             novelty_metadata["similarity_scores"] = similarity_scores
 
-            # First check: embedding similarity threshold (same as sync version)
+            # First pass duplicate detection: code embedding similarity.
             if max_similarity <= self.sync_judge.similarity_threshold:
                 logger.info(
                     f"NOVELTY CHECK: Accepting program due to low similarity "
@@ -122,7 +138,7 @@ class AsyncNoveltyJudge:
                 )
                 return True, novelty_metadata
 
-            # High similarity detected - check with LLM if configured (same as sync version)
+            # Semantic override path for near-duplicates.
             should_reject = True
             novelty_cost = 0.0
 
@@ -284,4 +300,3 @@ class AsyncNoveltyJudge:
     def __getattr__(self, name):
         """Delegate unknown methods to sync novelty judge."""
         return getattr(self.sync_judge, name)
-

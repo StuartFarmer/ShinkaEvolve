@@ -1,9 +1,15 @@
 import ast
-from radon.complexity import cc_visit
-from radon.metrics import h_visit
-from radon.raw import analyze
 import math
 import re
+
+try:
+    from radon.complexity import cc_visit
+    from radon.metrics import h_visit
+    from radon.raw import analyze
+except ImportError:  # pragma: no cover - optional dependency
+    cc_visit = None
+    h_visit = None
+    analyze = None
 
 
 def max_nesting_depth(code_string):
@@ -54,6 +60,12 @@ def analyze_python_complexity(code_string):
     Raises:
         SyntaxError: If the code cannot be parsed as valid Python
     """
+    if cc_visit is None or h_visit is None or analyze is None:
+        # Fallback to the generic analyzer when radon is unavailable.
+        metrics = analyze_generic_complexity(code_string)
+        metrics["max_nesting_depth"] = max_nesting_depth(code_string)
+        return metrics
+
     cc_results = cc_visit(code_string)
     total_cc = sum(block.complexity for block in cc_results)
     avg_cc = total_cc / len(cc_results) if cc_results else 0

@@ -51,6 +51,21 @@ def clean_nan_values(obj: Any) -> Any:
 
 @dataclass
 class DatabaseConfig:
+    """
+    Search-memory and lineage-structure knobs.
+
+    These are not evaluator/task settings. They control how Shinka stores
+    programs and samples from history.
+
+    Most important levers:
+    - `num_islands`: number of semi-independent search populations
+    - `archive_size`: how many high-value programs are retained for reuse
+    - `num_archive_inspirations`, `num_top_k_inspirations`: prompt context size
+    - `parent_selection_strategy`: weighted / beam / winner-take-all, etc.
+    - `migration_interval`, `migration_rate`: how ideas move across islands
+    - `enforce_island_separation`: whether parents/inspirations stay local to an
+      island except via explicit migration
+    """
     db_path: Optional[str] = None  # Path to SQLite database file
     num_islands: int = 2
     archive_size: int = 40
@@ -79,7 +94,7 @@ class DatabaseConfig:
 
     # Parent selection parameters
     parent_selection_strategy: str = (
-        "weighted"  # "weighted"/"power_law" / "beam_search"
+        "weighted"  # "weighted"/"power_law"/"beam_search"/"winner_take_all"
     )
 
     # Power-law parent selection parameters
@@ -997,6 +1012,23 @@ class ProgramDatabase:
         resample_attempt=None,
         max_resample_attempts=None,
     ) -> Tuple[Program, List[Program], List[Program]]:
+        """
+        Main sampling entry point used by the runner.
+
+        The sequence is:
+        1. choose an island
+        2. choose a parent within that island using the configured strategy
+        3. choose archive inspirations
+        4. choose top-k inspirations
+
+        This means "search policy" is distributed across:
+        - island sampling
+        - parent selection
+        - inspiration selection
+
+        If you want finer control, this method is a good place to split into
+        smaller public building blocks.
+        """
         if not self.cursor:
             raise ConnectionError("DB not connected.")
 
@@ -1031,7 +1063,8 @@ class ProgramDatabase:
 
             return parent, [], []
 
-        # All islands initialized - sample island + constrain parents
+        # Once islands are initialized, the parent/inspiration pipeline becomes
+        # island-scoped first, then strategy-specific within that scope.
         initialized_islands = self.island_manager.get_initialized_islands()
         sampled_island = self.island_sampler.sample_island(initialized_islands)
 
@@ -2343,8 +2376,12 @@ class ProgramDatabase:
         self, code_embedding: List[float], island_idx: int
     ) -> List[float]:
         """
-        Compute similarity scores between the given embedding and all programs
-        in the specified island.
+        Compute cosine similarity against stored code embeddings in one island.
+
+        This is the primary novelty test used by `NoveltyJudge`.
+        Nothing semantic happens here; it is purely an embedding-nearest-neighbor
+        lookup. The novelty gate later compares `max(similarities)` against
+        `EvolutionConfig.code_embed_sim_threshold`.
 
         Args:
             code_embedding: The embedding to compare against
@@ -2360,7 +2397,9 @@ class ProgramDatabase:
             logger.warning("Empty code embedding provided to compute_similarity")
             return []
 
-        # Get all programs in the specified island that have embeddings
+        # Novelty is intentionally local to the island, not global to the whole
+        # run. That allows different islands to explore similar ideas without
+        # immediately rejecting each other as duplicates.
         self.cursor.execute(
             """
             SELECT id, embedding FROM programs 
@@ -2400,7 +2439,10 @@ class ProgramDatabase:
         self, code_embedding: List[float], island_idx: int
     ) -> Optional[Program]:
         """
-        Get the most similar program to the given embedding in the specified island.
+        Get the nearest embedded neighbor in the current island.
+
+        This is used only when embedding similarity already says "too close" and
+        the optional novelty LLM needs an exact comparison target.
 
         Args:
             code_embedding: The embedding to compare against

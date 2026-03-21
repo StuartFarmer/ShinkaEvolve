@@ -7,6 +7,26 @@ import numpy as np  # type: ignore
 
 logger = logging.getLogger(__name__)
 
+"""
+Parent-selection strategies.
+
+This module answers the question "which existing program should the next child
+descend from?" That choice is separate from:
+
+- inspiration selection (`inspirations.py`)
+- patch style (`sampler.py`)
+- novelty filtering (`novelty_judge.py`)
+
+Those layers compose into Shinka's search behavior:
+- parent selection controls lineage pressure
+- inspirations control what extra ideas the LLM sees
+- patch type controls local-vs-global mutation size
+- novelty controls whether near-duplicates are allowed through
+
+If you want a new search regime, adding a new `ParentSamplingStrategy`
+subclass here is usually the cleanest route.
+"""
+
 
 def sample_with_powerlaw(items: list, alpha: float = 1.0) -> int:
     """
@@ -67,7 +87,13 @@ def stable_sigmoid(x: float) -> float:
 
 
 class ParentSamplingStrategy(ABC):
-    """Abstract base class for parent sampling strategies."""
+    """
+    Base extension point for lineage selection.
+
+    Subclasses are deliberately small: given the current DB state and an
+    optional island constraint, return one parent program. Everything else in
+    the search loop builds on that decision.
+    """
 
     def __init__(
         self,
@@ -235,7 +261,18 @@ class PowerLawSamplingStrategy(ParentSamplingStrategy):
 
 
 class WeightedSamplingStrategy(ParentSamplingStrategy):
-    """Weighted sampling strategy for parent selection."""
+    """
+    Fitness-biased parent sampling with a novelty bonus.
+
+    Weight for each candidate is:
+    - a score term: sigmoid(lambda * normalized_score_delta)
+    - multiplied by a novelty term: 1 / (1 + children_count)
+
+    Practical effect:
+    - better programs are sampled more often
+    - heavily-used parents lose probability mass over time
+    - the search stays exploitative without collapsing completely onto one node
+    """
 
     def sample_parent(self) -> Any:
         # Fetch all programs from the archive.
@@ -434,7 +471,14 @@ class WeightedSamplingStrategy(ParentSamplingStrategy):
 
 
 class BeamSearchSamplingStrategy(ParentSamplingStrategy):
-    """Beam search sampling strategy that locks onto a parent for multiple generations."""
+    """
+    Sticky exploitation strategy.
+
+    The current best parent is reused for `num_beams` children before the
+    selector rotates to the latest best program. This is useful when you want a
+    stronger "improve the current winner" bias than weighted sampling, but do
+    not want full winner-take-all greediness.
+    """
 
     def __init__(
         self,
@@ -596,6 +640,103 @@ class BestOfNSamplingStrategy(ParentSamplingStrategy):
 
         logger.warning("No suitable parent found for best-of-n strategy")
         return None
+
+
+class WinnerTakeAllSamplingStrategy(ParentSamplingStrategy):
+    """
+    Greedy parent strategy.
+
+    Every child is anchored to the current best correct program. Exploration can
+    still happen through:
+    - inspiration sampling
+    - patch type choice
+    - temperature / model choice
+    - novelty-gated retries
+
+    But the lineage itself follows the winner.
+    """
+
+    def __init__(
+        self,
+        cursor: sqlite3.Cursor,
+        conn: sqlite3.Connection,
+        config: Any,
+        get_program_func: Callable[[str], Any],
+        best_program_id: Optional[str] = None,
+        island_idx: Optional[int] = None,
+        get_best_program_func: Optional[Callable[[], Any]] = None,
+    ):
+        super().__init__(
+            cursor, conn, config, get_program_func, best_program_id, island_idx
+        )
+        self.get_best_program_func = get_best_program_func
+
+    def sample_parent(self) -> Any:
+        if self.get_best_program_func:
+            best_program = self.get_best_program_func()
+            if best_program and best_program.correct:
+                logger.info(
+                    f"Winner-take-all: Selected best program {best_program.id} "
+                    f"(Gen: {best_program.generation}, "
+                    f"Score: {best_program.combined_score or 0.0:.4f}, "
+                    f"Island: {best_program.island_idx})"
+                )
+                return best_program
+
+        if self.best_program_id:
+            prog = self.get_program(self.best_program_id)
+            if prog and prog.correct:
+                logger.info(
+                    f"Winner-take-all: Falling back to tracked best program "
+                    f"{self.best_program_id}"
+                )
+                return prog
+
+        if self.island_idx is not None:
+            self.cursor.execute(
+                """SELECT id FROM programs
+                   WHERE correct = 1 AND island_idx = ?
+                   ORDER BY combined_score DESC, generation DESC, id DESC LIMIT 1""",
+                (self.island_idx,),
+            )
+        else:
+            self.cursor.execute(
+                """SELECT id FROM programs
+                   WHERE correct = 1
+                   ORDER BY combined_score DESC, generation DESC, id DESC LIMIT 1"""
+            )
+
+        row = self.cursor.fetchone()
+        if row:
+            prog = self.get_program(row["id"])
+            if prog:
+                logger.info(
+                    f"Winner-take-all: Fallback selected best correct program "
+                    f"{prog.id} (Gen: {prog.generation}, "
+                    f"Score: {prog.combined_score or 0.0:.4f}, "
+                    f"Island: {prog.island_idx})"
+                )
+                return prog
+
+        logger.warning(
+            "No correct winner available for winner-take-all strategy, "
+            "falling back to most recent program"
+        )
+        if self.island_idx is not None:
+            self.cursor.execute(
+                """SELECT id FROM programs
+                   WHERE island_idx = ?
+                   ORDER BY generation DESC, id DESC LIMIT 1""",
+                (self.island_idx,),
+            )
+        else:
+            self.cursor.execute(
+                """SELECT id FROM programs
+                   ORDER BY generation DESC, id DESC LIMIT 1"""
+            )
+
+        row = self.cursor.fetchone()
+        return self.get_program(row["id"]) if row else None
 
 
 class SequentialSamplingStrategy(ParentSamplingStrategy):
@@ -813,6 +954,16 @@ class CombinedParentSelector:
                 self.get_program,
                 self.best_program_id,
                 island_idx,
+            )
+        elif strategy_name == "winner_take_all":
+            strategy = WinnerTakeAllSamplingStrategy(
+                cursor=self.cursor,
+                conn=self.conn,
+                config=self.config,
+                get_program_func=self.get_program,
+                best_program_id=self.best_program_id,
+                island_idx=island_idx,
+                get_best_program_func=self.get_best_program_func,
             )
         elif strategy_name == "sequential":
             strategy = SequentialSamplingStrategy(

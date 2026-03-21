@@ -1,3 +1,32 @@
+"""
+Novelty filtering for proposed programs.
+
+This module is intentionally small, but it sits on an important decision
+boundary in Shinka:
+
+1. Proposal code is generated.
+2. The code is embedded.
+3. Embedding similarity is compared against prior programs in the parent's island.
+4. If the proposal is "too similar", an optional LLM breaks the tie by deciding
+   whether the proposal is still meaningfully novel.
+
+The result is not a score adjustment. It is a gate:
+- accept the proposal and continue to evaluation, or
+- reject it and resample a new proposal context.
+
+The main levers exposed here are:
+- `similarity_threshold`: higher means stricter embedding-based novelty filtering
+- `max_novelty_attempts`: how many rejection-sampling retries to allow
+- `novelty_llm_client`: optional semantic judge for near-duplicates
+
+If you want custom novelty behavior, this module is the cleanest place to swap
+in another strategy:
+- different similarity metric
+- different candidate comparison scope
+- different semantic judge prompt / parser
+- richer acceptance policy than binary accept/reject
+"""
+
 from typing import Optional, Tuple, List
 import logging
 from pathlib import Path
@@ -9,7 +38,20 @@ logger = logging.getLogger(__name__)
 
 
 class NoveltyJudge:
-    """Handles novelty assessment for generated code using LLM-based comparison."""
+    """
+    Two-stage novelty gate.
+
+    Stage 1 is cheap and deterministic:
+    compare the candidate embedding against programs already stored in the
+    relevant island.
+
+    Stage 2 is optional and semantic:
+    if the embedding test says "too similar", ask an LLM whether the change is
+    still meaningful enough to keep.
+
+    This class does not generate new candidates itself. It only decides whether
+    a generated candidate is novel enough to proceed.
+    """
 
     def __init__(
         self,
@@ -42,10 +84,16 @@ class NoveltyJudge:
         Returns:
             Boolean indicating if novelty check should be performed
         """
+        # Novelty checking only makes sense once we have:
+        # - an embedding for the candidate,
+        # - a non-initial generation,
+        # - and a concrete parent / island context to compare against.
         if not code_embedding or generation == 0 or not parent_program:
             return False
 
-        # Check if parent program has island information and islands are initialized
+        # Novelty is island-scoped in the current design. Until islands are
+        # initialized, Shinka intentionally avoids filtering proposals by
+        # similarity so the archive can bootstrap.
         if (
             parent_program.island_idx is not None
             and hasattr(database, "island_manager")
@@ -85,7 +133,8 @@ class NoveltyJudge:
         }
 
         for attempt in range(self.max_novelty_attempts):
-            # Compute similarities with programs in island
+            # The actual "novelty test" begins with cosine similarity over code
+            # embeddings. This is the first-pass duplicate detector, not the LLM.
             similarity_scores = database.compute_similarity(
                 code_embedding, parent_program.island_idx
             )
@@ -107,6 +156,8 @@ class NoveltyJudge:
             novelty_metadata["max_similarity"] = max_similarity
             novelty_metadata["similarity_scores"] = similarity_scores
 
+            # If the nearest neighbor is below the threshold, the proposal is
+            # considered novel enough and no semantic judge is needed.
             if max_similarity <= self.similarity_threshold:
                 logger.info(
                     f"NOVELTY CHECK {attempt + 1}/{self.max_novelty_attempts}: "
@@ -115,12 +166,17 @@ class NoveltyJudge:
                 )
                 return True, novelty_metadata
 
-            # High similarity detected - check with LLM if configured
+            # If the embedding gate says "too similar", we optionally ask an
+            # LLM whether the proposal is still meaningfully different. This is
+            # effectively a semantic tie-breaker for near-duplicates.
             should_reject = True
             novelty_cost = 0.0
 
             if self.novelty_llm_client is not None:
-                # Get the most similar program for LLM comparison
+                # Today the LLM only sees the single closest neighbor. If you
+                # want a stronger novelty judge, this is an obvious extension
+                # point: compare against top-k nearest programs or build a
+                # summary of the local neighborhood instead.
                 most_similar_program = database.get_most_similar_program(
                     code_embedding, parent_program.island_idx
                 )
@@ -153,7 +209,9 @@ class NoveltyJudge:
                     )
                     + ". Retrying with different parent/inspirations."
                 )
-                # Continue to next attempt (rejection sampling)
+                # Rejection sampling here means:
+                # "discard this candidate and let the runner try another prompt
+                # context / patch attempt, up to max_novelty_attempts."
                 continue
             else:
                 logger.info(
@@ -175,9 +233,20 @@ class NoveltyJudge:
         self, proposed_code: str, most_similar_program: Program
     ) -> Tuple[bool, str, float]:
         """
-        Use LLM to judge if the proposed code is meaningfully different from
-        the most similar program.
+        Use an LLM to judge whether a near-duplicate is still substantively new.
 
+        Current contract:
+        - prompt contains existing code + proposed code
+        - parser treats a response starting with `NOVEL` as acceptance
+        - everything else counts as rejection
+
+        To extend this without changing the runner, subclass NoveltyJudge and
+        override this method. Common variants:
+        - richer structured outputs
+        - multi-grade novelty scoring instead of binary labels
+        - domain-specific novelty criteria
+        - stricter parsing / schema validation
+        
         Args:
             proposed_code: The newly generated code
             most_similar_program: The most similar existing program

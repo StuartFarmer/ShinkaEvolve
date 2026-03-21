@@ -243,7 +243,17 @@ class TopKInspirationSelector(ContextSelectorStrategy):
 
 
 class CombinedContextSelector:
-    """Combined context selector that handles both archive inspirations and top-k selection."""
+    """
+    Samples non-parent reference programs for prompt conditioning.
+
+    Important distinction:
+    - parent selection determines the lineage source of truth
+    - inspiration selection determines what additional ideas the LLM can borrow
+
+    In practice this means you can keep a greedy parent strategy while still
+    exposing the proposer to broader architectural ideas via archive/top-k
+    inspirations.
+    """
 
     def __init__(
         self,

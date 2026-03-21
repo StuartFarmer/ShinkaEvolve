@@ -45,6 +45,7 @@ from shinka.edit.async_apply import (
 )
 from shinka.edit import summarize_diff
 from shinka.core.sampler import PromptSampler
+from shinka.core.context_sampler import AsyncContextSampler
 from shinka.core.summarizer import MetaSummarizer
 from shinka.core.async_summarizer import AsyncMetaSummarizer
 from shinka.core.async_novelty_judge import AsyncNoveltyJudge
@@ -153,6 +154,7 @@ class ShinkaEvolveRunner:
         max_proposal_jobs: Optional[int] = None,
         max_db_workers: Optional[int] = None,
         debug: bool = False,
+        task_dir: Optional[str] = None,
         init_program_str: Optional[str] = None,
         evaluate_str: Optional[str] = None,
     ):
@@ -169,6 +171,8 @@ class ShinkaEvolveRunner:
                 (defaults to evo_config.max_proposal_jobs)
             max_db_workers: Maximum concurrent async DB worker threads
                 (defaults to evo_config.max_db_workers)
+            task_dir: Optional task directory to copy into results_dir so
+                evaluator-side helper files and assets are available during runs
             init_program_str: Optional string content for initial program
                 (will be saved to results dir and path updated in evo_config)
             evaluate_str: Optional string content for evaluate script
@@ -214,6 +218,9 @@ class ShinkaEvolveRunner:
             Path(self.results_dir).mkdir(parents=True, exist_ok=True)
 
         _print_gradient_logo_and_mirror(Path(log_filename))
+
+        if task_dir is not None:
+            self._copy_task_support_tree(Path(task_dir))
 
         # Handle init_program_str: write to file and update config path
         if init_program_str is not None:
@@ -282,7 +289,10 @@ class ShinkaEvolveRunner:
         # Initialize rich console and mirror rich renderables into the run log.
         self.console = RichTeeConsole(Console(), Path(log_filename))
 
-        # Initialize LLM selection strategy
+        # Model-choice policy for proposal generation.
+        # This is separate from parent selection:
+        # - parent selection chooses which program lineage to mutate
+        # - LLM selection chooses which model gets the next proposal attempt
         if evo_config.llm_dynamic_selection is None:
             self.llm_selection = None
         elif isinstance(evo_config.llm_dynamic_selection, BanditBase):
@@ -311,6 +321,7 @@ class ShinkaEvolveRunner:
         # Database will be initialized in _setup_async()
         self.db = None
         self.async_db = None
+        self.context_sampler = None
 
         # LLM clients
         self.llm = AsyncLLMClient(
@@ -331,7 +342,9 @@ class ShinkaEvolveRunner:
             job_type=evo_config.job_type, config=job_config, verbose=verbose
         )
 
-        # Prompt sampler
+        # PromptSampler controls patch-type sampling and prompt assembly. It does
+        # not own scheduling; it only turns (parent, inspirations, feedback)
+        # into a concrete proposal prompt.
         self.prompt_sampler = PromptSampler(
             task_sys_msg=evo_config.task_sys_msg,
             language=evo_config.language,
@@ -341,7 +354,9 @@ class ShinkaEvolveRunner:
             inspiration_sort_order=evo_config.inspiration_sort_order,
         )
 
-        # Meta summarizer (create both sync and async versions)
+        # Meta summarizer is the cross-program feedback loop. It periodically
+        # summarizes the run so far and injects higher-level recommendations
+        # into future proposal prompts.
         if evo_config.meta_rec_interval and evo_config.meta_llm_models:
             # Create async LLM client for meta analysis
             async_meta_llm = AsyncLLMClient(
@@ -364,7 +379,9 @@ class ShinkaEvolveRunner:
         else:
             self.meta_summarizer = None
 
-        # Novelty judge
+        # Novelty judge is a gate between proposal generation and evaluation.
+        # It does NOT score candidates. It only decides whether a proposal is
+        # sufficiently different from nearby prior programs to deserve an eval.
         if evo_config.novelty_llm_models:
             novelty_llm = AsyncLLMClient(
                 model_names=evo_config.novelty_llm_models,
@@ -455,6 +472,35 @@ class ShinkaEvolveRunner:
         # Meta task logging state (to reduce verbosity)
         self._last_meta_log_state: dict | None = None
         self._last_meta_log_info_time: float | None = None
+
+    def _copy_task_support_tree(self, task_dir: Path) -> None:
+        """Copy task files into results_dir so evaluation runs are self-contained."""
+        task_dir = task_dir.resolve()
+        results_dir = Path(self.results_dir).resolve()
+
+        if not task_dir.exists() or not task_dir.is_dir():
+            raise FileNotFoundError(f"Task dir does not exist: {task_dir}")
+
+        ignore = shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store")
+        copied_entries = 0
+
+        for child in task_dir.iterdir():
+            if child.resolve() == results_dir:
+                continue
+
+            dest = results_dir / child.name
+            if child.is_dir():
+                shutil.copytree(child, dest, dirs_exist_ok=True, ignore=ignore)
+            else:
+                shutil.copy2(child, dest)
+            copied_entries += 1
+
+        if self.verbose:
+            logger.info(
+                "Copied %d task support entries into %s",
+                copied_entries,
+                results_dir,
+            )
 
     def _save_bandit_state(self) -> None:
         """Save the LLM selection bandit state to disk."""
@@ -831,6 +877,7 @@ class ShinkaEvolveRunner:
             max_workers=self.max_db_workers,
             enable_deadlock_debugging=self.enable_deadlock_debugging,
         )
+        self.context_sampler = AsyncContextSampler(self.db_config)
 
         # Initialize prompt evolution database if enabled
         if self.evo_config.evolve_prompts:
@@ -2329,22 +2376,23 @@ class ShinkaEvolveRunner:
         if self.llm_selection is not None:
             model_sample_probs, model_posterior = self.llm_selection.select_llm()
 
+        # Outer loop: novelty retries. We may resample a brand-new proposal if
+        # the generated code is judged too similar to prior work.
         for attempt in range(self.evo_config.max_novelty_attempts):
             for resample in range(self.evo_config.max_patch_resamples):
                 try:
                     # Sample parent and inspirations with fix mode detection
-                    (
-                        parent_program,
-                        archive_programs,
-                        top_k_programs,
-                        needs_fix,
-                    ) = await self.async_db.sample_with_fix_mode_async(
+                    sampled_context = await self.context_sampler.sample(
                         target_generation=generation,
                         novelty_attempt=attempt + 1,
                         max_novelty_attempts=self.evo_config.max_novelty_attempts,
                         resample_attempt=resample + 1,
                         max_resample_attempts=self.evo_config.max_patch_resamples,
                     )
+                    parent_program = sampled_context.parent
+                    archive_programs = sampled_context.archive_inspirations
+                    top_k_programs = sampled_context.top_k_inspirations
+                    needs_fix = sampled_context.needs_fix
 
                     # Sync beam_search parent to main database if using beam_search strategy
                     # (async sampling uses read-only thread-local DBs that can't persist state)
@@ -2426,7 +2474,9 @@ class ShinkaEvolveRunner:
                 proposal_accepted = True  # Accept program even without embedding
                 break
 
-            # Novelty check (same logic as sync runner)
+            # Novelty check happens after code generation and embedding, but
+            # before expensive evaluation. This is where near-duplicate
+            # proposals are filtered out.
             if self.novelty_judge:
                 should_check = await self.novelty_judge.should_check_novelty_async(
                     code_embedding, generation, parent_program, self.db

@@ -417,6 +417,7 @@ def _validate_task_dir(task_dir: Path) -> Path:
 def _build_runner(
     *,
     args: argparse.Namespace,
+    task_dir: Path,
     evo_config: EvolutionConfig,
     db_config: DatabaseConfig,
     job_config: LocalJobConfig,
@@ -429,6 +430,7 @@ def _build_runner(
         "db_config": db_config,
         "verbose": args.verbose,
         "debug": args.debug,
+        "task_dir": str(task_dir),
         "init_program_str": init_program_str,
         "evaluate_str": evaluate_str,
     }
@@ -554,6 +556,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
         runner = _build_runner(
             args=args,
+            task_dir=task_dir,
             evo_config=evo_config,
             db_config=db_config,
             job_config=job_config,

@@ -1,12 +1,22 @@
-from unidiff import PatchSet
-from unidiff.errors import UnidiffParseError
 import logging
+
+try:
+    from unidiff import PatchSet
+    from unidiff.errors import UnidiffParseError
+except ImportError:  # pragma: no cover - optional dependency
+    PatchSet = None
+
+    class UnidiffParseError(Exception):
+        pass
 
 logger = logging.getLogger(__name__)
 
 
 def summarize_diff(diff_file_path: str) -> dict:
     summary = {}
+    if PatchSet is None:
+        logger.debug("unidiff is unavailable; returning empty diff summary.")
+        return summary
     try:
         with open(diff_file_path, "r") as f:
             patch = PatchSet(f)

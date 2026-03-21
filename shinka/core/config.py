@@ -18,6 +18,39 @@ FOLDER_PREFIX = "gen"
 
 @dataclass
 class EvolutionConfig:
+    """
+    High-level search policy knobs.
+
+    This dataclass is convenient for the default runner, but conceptually it is
+    just a bundle of arguments for four subsystems:
+
+    - proposal generation
+    - novelty filtering
+    - meta-feedback / prompt evolution
+    - runtime scheduling
+
+    If you build a manual controller, these values do not need to live in one
+    config object. They can be passed directly into the corresponding calls.
+
+    Important levers related to novelty / diversity:
+    - `patch_types`, `patch_type_probs`:
+      controls whether search stays local (`diff`) or makes larger jumps
+      (`full`, `cross`)
+    - `code_embed_sim_threshold`:
+      embedding-similarity cutoff used by `NoveltyJudge`
+    - `max_novelty_attempts`:
+      how many rejection-sampling retries are allowed after novelty failures
+    - `novelty_llm_models`, `novelty_llm_kwargs`:
+      semantic tie-breaker for near-duplicate proposals
+    - `use_text_feedback`:
+      whether evaluator-written analysis is fed back into the next prompt
+    - `meta_rec_interval`:
+      cadence for higher-level meta recommendations across many programs
+    - `evolve_prompts`, `prompt_*`:
+      whether Shinka mutates the system prompt itself, not just the code
+    - `llm_dynamic_selection`, `llm_dynamic_selection_kwargs`:
+      bandit policy for allocating proposal traffic across multiple LLMs
+    """
     task_sys_msg: Optional[str] = DEFAULT_TASK_SYS_MSG
     island_seeds: Optional[List[Dict[str, Any]]] = None
     patch_types: List[str] = field(default_factory=default_patch_types)

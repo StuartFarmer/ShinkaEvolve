@@ -26,6 +26,22 @@ logger = logging.getLogger(__name__)
 
 
 class PromptSampler:
+    """
+    Prompt assembly layer for code proposals.
+
+    Responsibilities here are narrower than the runner but still important:
+    - choose a patch mode (`diff`, `full`, `cross`)
+    - inject task prompt + optional meta recommendations
+    - order archive/top-k inspirations for the LLM
+    - attach evaluator text feedback when enabled
+
+    Extension points:
+    - subclass if you want a different patch-type policy or prompt layout
+    - swap `InspirationContextBuilder` ordering to change how examples are
+      presented to the model
+    - drive `patch_types` / `patch_type_probs` manually from an outer loop for
+      adaptive exploration schedules
+    """
     def __init__(
         self,
         task_sys_msg: Optional[str] = None,
@@ -86,8 +102,13 @@ class PromptSampler:
         else:
             sys_msg = self.task_sys_msg
 
-        # Sample coding type
-        # Filter out crossover if no inspirations
+        # Patch type is the core exploration/exploitation lever:
+        # - diff: local edits around the parent
+        # - full: full rewrite anchored on parent context
+        # - cross: combine parent with inspiration programs
+        #
+        # Crossover is only valid when inspirations exist, so it is filtered out
+        # dynamically and the probabilities are renormalized.
         if len(archive_inspirations) == 0 and len(top_k_inspirations) == 0:
             valid_types = [t for t in self.patch_types if t != "cross"]
             valid_probs = [
@@ -114,7 +135,9 @@ class PromptSampler:
                 p=self.patch_type_probs,
             )
 
-        # Add meta-recommendations BEFORE format instructions (if provided)
+        # Meta recommendations are appended to the system prompt so they act as
+        # guidance, not as hard constraints. This is where cross-program
+        # summaries from the meta-summarizer influence the next child.
         if meta_recommendations not in [None, "none"] and patch_type != "cross":
             sys_msg += "\n\n# Potential Recommendations"
             sys_msg += (
@@ -144,7 +167,9 @@ class PromptSampler:
         elif patch_type == "cross":
             sys_msg += CROSS_SYS_FORMAT
 
-        # Build sorted inspiration context (combines archive + top-k)
+        # Inspirations are kept separate in the database, but merged for the
+        # prompt. The ordering policy matters because LLMs often overweight the
+        # most recent examples in-context.
         sorted_inspirations = self.context_builder.build_context(
             archive_inspirations, top_k_inspirations
         )
@@ -158,7 +183,9 @@ class PromptSampler:
         else:
             eval_history_msg = ""
 
-        # Format text feedback section for current program
+        # `text_feedback` is the evaluator-to-proposer feedback loop: free-form
+        # analysis written by the task evaluator that gets injected into the
+        # next proposal prompt.
         text_feedback_section = ""
         if self.use_text_feedback:
             text_feedback_section = "\n" + format_text_feedback_section(

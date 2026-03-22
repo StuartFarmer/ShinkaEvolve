@@ -13,19 +13,19 @@ logger = logging.getLogger(__name__)
 
 
 class DatabaseDisplay:
-    """Rich console display backed by repositories/services, not raw SQL."""
+    """Rich console display backed by controllers/services, not raw SQL."""
 
     def __init__(
         self,
         *,
-        program_repository,
+        programs,
         archive_size: int,
         num_islands: int,
         island_manager,
         archive_policy,
         default_console: Optional[RichConsole] = None,
     ):
-        self.program_repository = program_repository
+        self.programs = programs
         self.archive_size = archive_size
         self.num_islands = num_islands
         self.island_manager = island_manager
@@ -43,10 +43,10 @@ class DatabaseDisplay:
         return console or self.default_console or RichConsole()
 
     def _all_programs(self):
-        return self.program_repository.list_all()
+        return self.programs.list_all()
 
     def _best_program(self):
-        return self.program_repository.get_best()
+        return self.programs.get_best()
 
     def _cost_totals(self):
         total_api_cost = 0.0
@@ -290,7 +290,7 @@ class DatabaseDisplay:
         tables_to_display.append(cost_table)
         _console.print(RichColumns(tables_to_display))
 
-        top_programs = self.program_repository.list_top(
+        top_programs = self.programs.list_top(
             n=10,
             metric="combined_score",
             correct_only=True,

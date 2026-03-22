@@ -1,7 +1,7 @@
 """
 Search-policy services used by context sampling.
 
-These classes consume repository state and computed archive state. They do not
+These classes consume controller state and computed archive state. They do not
 own persistence.
 """
 
@@ -54,7 +54,7 @@ def _sort_programs_by_score(programs: Sequence[Program]) -> List[Program]:
 
 
 class ParentSelector:
-    """Repository-backed parent selection policy."""
+    """Controller-backed parent selection policy."""
 
     def __init__(
         self,
@@ -71,43 +71,43 @@ class ParentSelector:
 
     def has_correct_programs(
         self,
-        repository: ProgramController,
+        programs: ProgramController,
         *,
         island_idx: Optional[int] = None,
     ) -> bool:
-        return bool(repository.list_correct(island_idx=island_idx))
+        return bool(programs.list_correct(island_idx=island_idx))
 
     def get_incorrect_program_for_fix(
         self,
-        repository: ProgramController,
+        programs: ProgramController,
         *,
         island_idx: Optional[int] = None,
     ) -> Optional[Program]:
-        incorrect = repository.list_incorrect(island_idx=island_idx)
+        incorrect = programs.list_incorrect(island_idx=island_idx)
         if not incorrect:
             return None
         return random.choice(incorrect)
 
     def select_with_fix_mode(
         self,
-        repository: ProgramController,
+        programs: ProgramController,
         archive_programs: Sequence[Program],
         *,
         island_idx: Optional[int] = None,
     ) -> tuple[Program, bool]:
-        if not self.has_correct_programs(repository, island_idx=island_idx):
+        if not self.has_correct_programs(programs, island_idx=island_idx):
             incorrect = self.get_incorrect_program_for_fix(
-                repository,
+                programs,
                 island_idx=island_idx,
             )
             if incorrect is not None:
                 return incorrect, True
-            raise ValueError("Repository empty - no programs to sample or fix.")
-        return self.select(repository, archive_programs, island_idx=island_idx), False
+            raise ValueError("No programs available to sample or fix.")
+        return self.select(programs, archive_programs, island_idx=island_idx), False
 
     def select(
         self,
-        repository: ProgramController,
+        programs: ProgramController,
         archive_programs: Sequence[Program],
         *,
         island_idx: Optional[int] = None,
@@ -115,32 +115,32 @@ class ParentSelector:
         strategy_name = self.parent_selection_strategy
 
         if strategy_name == "power_law":
-            parent = self._select_power_law(repository, archive_programs, island_idx)
+            parent = self._select_power_law(programs, archive_programs, island_idx)
         elif strategy_name == "weighted":
-            parent = self._select_weighted(repository, archive_programs, island_idx)
+            parent = self._select_weighted(programs, archive_programs, island_idx)
         elif strategy_name == "beam_search":
-            parent = self._select_beam_search(repository, island_idx)
+            parent = self._select_beam_search(programs, island_idx)
         elif strategy_name == "best_of_n":
-            parent = self._select_best_of_n(repository, island_idx)
+            parent = self._select_best_of_n(programs, island_idx)
         elif strategy_name == "winner_take_all":
-            parent = self._select_winner_take_all(repository, island_idx)
+            parent = self._select_winner_take_all(programs, island_idx)
         elif strategy_name == "sequential":
-            parent = self._select_sequential(repository, island_idx)
+            parent = self._select_sequential(programs, island_idx)
         else:
             raise ValueError(f"Unknown parent selection strategy: {strategy_name}")
 
         if parent is not None:
             return parent
 
-        fallback = repository.get_best(island_idx=island_idx)
+        fallback = programs.get_best(island_idx=island_idx)
         if fallback is not None:
             return fallback
 
-        fallback = repository.get_most_recent(island_idx=island_idx)
+        fallback = programs.get_most_recent(island_idx=island_idx)
         if fallback is not None:
             return fallback
 
-        raise ValueError("Repository empty or parent sampling failed.")
+        raise ValueError("Program controller is empty or parent sampling failed.")
 
     def _archive_candidates(
         self,
@@ -154,14 +154,14 @@ class ParentSelector:
 
     def _correct_candidates(
         self,
-        repository: ProgramController,
+        programs: ProgramController,
         island_idx: Optional[int],
     ) -> List[Program]:
-        return _sort_programs_by_score(repository.list_correct(island_idx=island_idx))
+        return _sort_programs_by_score(programs.list_correct(island_idx=island_idx))
 
     def _select_power_law(
         self,
-        repository: ProgramController,
+        programs: ProgramController,
         archive_programs: Sequence[Program],
         island_idx: Optional[int],
     ) -> Optional[Program]:
@@ -169,21 +169,21 @@ class ParentSelector:
         if candidates:
             return _sample_with_powerlaw(candidates, self.exploitation_alpha)
 
-        candidates = self._correct_candidates(repository, island_idx)
+        candidates = self._correct_candidates(programs, island_idx)
         if candidates:
             return _sample_with_powerlaw(candidates, self.exploitation_alpha)
 
-        return repository.get_best(island_idx=island_idx)
+        return programs.get_best(island_idx=island_idx)
 
     def _select_weighted(
         self,
-        repository: ProgramController,
+        programs: ProgramController,
         archive_programs: Sequence[Program],
         island_idx: Optional[int],
     ) -> Optional[Program]:
         candidates = self._archive_candidates(archive_programs, island_idx)
         if not candidates:
-            return repository.get_best(island_idx=island_idx)
+            return programs.get_best(island_idx=island_idx)
 
         scores = [float(program.combined_score or 0.0) for program in candidates]
         alpha_0 = float(np.median(scores)) if scores else 0.0
@@ -210,36 +210,36 @@ class ParentSelector:
 
     def _select_beam_search(
         self,
-        repository: ProgramController,
+        programs: ProgramController,
         island_idx: Optional[int],
     ) -> Optional[Program]:
         num_beams = int(self.num_beams)
-        beam_parent_id = repository.get_metadata("beam_search_parent_id")
+        beam_parent_id = programs.get_metadata("beam_search_parent_id")
 
         if beam_parent_id:
-            beam_parent = repository.get(beam_parent_id)
+            beam_parent = programs.get(beam_parent_id)
             if beam_parent is not None and (
                 island_idx is None or beam_parent.island_idx == island_idx
             ):
-                children_count = repository.get_children_count(beam_parent.id)
+                children_count = programs.get_children_count(beam_parent.id)
                 if children_count < num_beams:
                     return beam_parent
 
-        best_program = repository.get_best(island_idx=island_idx)
+        best_program = programs.get_best(island_idx=island_idx)
         if best_program is not None:
-            if not repository.read_only:
-                repository.set_metadata("beam_search_parent_id", best_program.id)
+            if not programs.read_only:
+                programs.set_metadata("beam_search_parent_id", best_program.id)
             return best_program
         return None
 
     def _select_best_of_n(
         self,
-        repository: ProgramController,
+        programs: ProgramController,
         island_idx: Optional[int],
     ) -> Optional[Program]:
-        programs = repository.list_by_island(island_idx, correct_only=True) if island_idx is not None else repository.list_correct()
+        candidates = programs.list_by_island(island_idx, correct_only=True) if island_idx is not None else programs.list_correct()
         generation_zero = [
-            program for program in programs if program.generation == 0 and program.correct
+            program for program in candidates if program.generation == 0 and program.correct
         ]
         generation_zero = sorted(
             generation_zero,
@@ -247,31 +247,31 @@ class ParentSelector:
         )
         if generation_zero:
             return generation_zero[0]
-        return repository.get_earliest(correct_only=True, island_idx=island_idx)
+        return programs.get_earliest(correct_only=True, island_idx=island_idx)
 
     def _select_winner_take_all(
         self,
-        repository: ProgramController,
+        programs: ProgramController,
         island_idx: Optional[int],
     ) -> Optional[Program]:
-        best = repository.get_best(island_idx=island_idx)
+        best = programs.get_best(island_idx=island_idx)
         if best is not None:
             return best
-        return repository.get_most_recent(correct_only=True, island_idx=island_idx)
+        return programs.get_most_recent(correct_only=True, island_idx=island_idx)
 
     def _select_sequential(
         self,
-        repository: ProgramController,
+        programs: ProgramController,
         island_idx: Optional[int],
     ) -> Optional[Program]:
-        program = repository.get_most_recent(correct_only=True, island_idx=island_idx)
+        program = programs.get_most_recent(correct_only=True, island_idx=island_idx)
         if program is not None:
             return program
-        return repository.get_most_recent(island_idx=island_idx)
+        return programs.get_most_recent(island_idx=island_idx)
 
 
 class InspirationSelector:
-    """Repository-backed inspiration selection policy."""
+    """Controller-backed inspiration selection policy."""
 
     def __init__(
         self,
@@ -284,7 +284,7 @@ class InspirationSelector:
 
     def select_archive(
         self,
-        repository: ProgramController,
+        programs: ProgramController,
         parent: Program,
         archive_programs: Sequence[Program],
         *,
@@ -306,7 +306,7 @@ class InspirationSelector:
                 if program.island_idx == parent_island_idx
             ]
 
-        best_program = repository.get_best()
+        best_program = programs.get_best()
         if (
             best_program is not None
             and best_program.correct

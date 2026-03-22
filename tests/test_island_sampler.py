@@ -6,7 +6,7 @@ from shinka.database import Program
 from shinka.database.island_sampler import create_island_sampler
 from shinka.database.archive_policy import create_archive_policy
 from shinka.database.islands import CombinedIslandManager
-from shinka.database.repository_bundle import RepositoryBundle
+from shinka.controllers import DatabaseController
 
 
 def test_island_samplers():
@@ -21,12 +21,12 @@ def test_island_samplers():
         for strategy in strategies:
             print(f"\n=== Testing {strategy} strategy ===")
 
-            bundle = RepositoryBundle.open(
+            controller = DatabaseController.open(
                 db_path=str(db_path),
                 num_islands=3,
                 read_only=False,
             )
-            repo = bundle.programs
+            repo = controller.programs
             archive_policy = create_archive_policy(
                 archive_selection_strategy="fitness",
                 archive_size=40,
@@ -39,12 +39,12 @@ def test_island_samplers():
                 island_elitism=True,
                 island_spawn_strategy="initial",
                 island_spawn_subtree_size=1,
-                program_repository=repo,
-                island_controller=bundle.controller.islands,
+                programs=repo,
+                island_controller=controller.islands,
                 archive_policy=archive_policy,
             )
             island_sampler = create_island_sampler(
-                program_repository=repo,
+                programs=repo,
                 strategy=strategy,
             )
 
@@ -75,7 +75,7 @@ def test_island_samplers():
             # Verify all strategies can sample
             assert len(samples) > 0, f"{strategy} strategy produced no samples"
 
-            bundle.close()
+            controller.close()
 
             # Clean up for next test
             if db_path.exists():

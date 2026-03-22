@@ -25,7 +25,7 @@ class ProgramWriteService:
     program to the system:
 
     - assign island
-    - persist program through `ProgramController`
+    - persist program through the program controller
     - run best/generation tracking callbacks
     - run island-copy / spawn / migration side effects
     - run optional post-write hooks like embedding recomputation or summaries
@@ -34,7 +34,7 @@ class ProgramWriteService:
     def __init__(
         self,
         *,
-        program_repository: "ProgramController",
+        programs: "ProgramController",
         island_manager: "CombinedIslandManager",
         update_best_program: Callable[["Program"], None],
         update_metadata: Callable[[str, Optional[str]], None],
@@ -42,7 +42,7 @@ class ProgramWriteService:
         print_program_summary: Optional[Callable[["Program"], None]] = None,
         maybe_spawn_island: Optional[Callable[[int], bool]] = None,
     ) -> None:
-        self.program_repository = program_repository
+        self.programs = programs
         self.island_manager = island_manager
         self.update_best_program = update_best_program
         self.update_metadata = update_metadata
@@ -58,7 +58,7 @@ class ProgramWriteService:
         current_last_iteration: int = 0,
     ) -> ProgramWriteResult:
         self.island_manager.assign_island(program)
-        program_id = self.program_repository.add(program, verbose=False)
+        program_id = self.programs.add(program, verbose=False)
 
         self.update_best_program(program)
 
@@ -77,8 +77,8 @@ class ProgramWriteService:
             self.island_manager.copy_program_to_islands(program)
             if program.metadata:
                 program.metadata.pop("_needs_island_copies", None)
-                self.program_repository.update_program_metadata(program.id, program.metadata)
-                self.program_repository.commit()
+                self.programs.update_program_metadata(program.id, program.metadata)
+                self.programs.commit()
 
         spawned_island = False
         if self.maybe_spawn_island is not None:

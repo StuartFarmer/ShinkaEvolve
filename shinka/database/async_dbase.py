@@ -18,7 +18,6 @@ from .islands import CombinedIslandManager
 from .program_write_service import ProgramWriteService
 from shinka.controllers import DatabaseController, EmbeddingController, ProgramController
 from .connector import DatabaseConnector
-from .repository_bundle import RepositoryBundle
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +79,7 @@ db_debugger = AsyncDBDebugger()
 
 
 class AsyncProgramDatabase:
-    """Async wrapper around repository-backed runtime services."""
+    """Async wrapper around controller-backed runtime services."""
 
     def __init__(
         self,
@@ -191,7 +190,7 @@ class AsyncProgramDatabase:
         if self.enable_deadlock_debugging and op_id is not None:
             db_debugger.track_end(op_id, success=success)
 
-    def _open_repository(self, *, read_only: bool) -> ProgramController:
+    def _open_programs(self, *, read_only: bool) -> ProgramController:
         return DatabaseController(
             DatabaseConnector.open(
                 db_path=self.db_path,
@@ -251,7 +250,7 @@ class AsyncProgramDatabase:
                     try:
                         from shinka.core.context_sampler import ContextSampler
 
-                        repo = self._open_repository(read_only=True)
+                        repo = self._open_programs(read_only=True)
                         sampler = ContextSampler(
                             repo,
                             num_islands=self.num_islands,
@@ -332,7 +331,7 @@ class AsyncProgramDatabase:
                     try:
                         from shinka.core.context_sampler import ContextSampler
 
-                        repo = self._open_repository(read_only=True)
+                        repo = self._open_programs(read_only=True)
                         sampler = ContextSampler(
                             repo,
                             num_islands=self.num_islands,
@@ -400,7 +399,7 @@ class AsyncProgramDatabase:
                 def update_thread_safe():
                     repo = None
                     try:
-                        repo = self._open_repository(read_only=False)
+                        repo = self._open_programs(read_only=False)
                         repo.set_metadata("beam_search_parent_id", parent_id)
                         self.update_beam_search_parent(parent_id)
                     finally:
@@ -606,7 +605,7 @@ class AsyncProgramDatabase:
 
     def _build_thread_write_service(
         self,
-        bundle: RepositoryBundle,
+        controller: DatabaseController,
     ) -> ProgramWriteService:
         island_manager = CombinedIslandManager(
             num_islands=self.num_islands,
@@ -615,8 +614,8 @@ class AsyncProgramDatabase:
             island_elitism=self.island_elitism,
             island_spawn_strategy=self.island_spawn_strategy,
             island_spawn_subtree_size=self.island_spawn_subtree_size,
-            program_repository=bundle.programs,
-            island_controller=bundle.islands,
+            programs=controller.programs,
+            island_controller=controller.islands,
             archive_policy=create_archive_policy(
                 archive_selection_strategy=self.archive_selection_strategy,
                 archive_size=self.archive_size,
@@ -627,41 +626,41 @@ class AsyncProgramDatabase:
         def update_best_metadata(program: Program) -> None:
             if not program.correct:
                 return
-            current_best = bundle.programs.get_best()
+            current_best = controller.programs.get_best()
             if current_best is None or current_best.id != program.id:
                 return
             score = program.combined_score or 0.0
-            best_score_ever_raw = bundle.programs.get_metadata("best_score_ever")
+            best_score_ever_raw = controller.programs.get_metadata("best_score_ever")
             best_score_ever = (
                 float(best_score_ever_raw)
                 if best_score_ever_raw not in (None, "")
                 else None
             )
             if best_score_ever is None or score > best_score_ever:
-                bundle.programs.set_metadata("best_score_generation", str(program.generation))
-                bundle.programs.set_metadata("best_score_ever", str(score))
+                controller.programs.set_metadata("best_score_generation", str(program.generation))
+                controller.programs.set_metadata("best_score_ever", str(score))
 
         def maybe_spawn_island(current_generation: int) -> bool:
             if not self.enable_dynamic_islands:
                 return False
             threshold = self.stagnation_threshold
-            best_gen_raw = bundle.programs.get_metadata("best_score_generation", "0")
+            best_gen_raw = controller.programs.get_metadata("best_score_generation", "0")
             best_generation = int(best_gen_raw or 0)
             if current_generation - best_generation < threshold:
                 return False
             spawned = island_manager.spawn_new_island()
             if spawned:
-                bundle.programs.set_metadata(
+                controller.programs.set_metadata(
                     "best_score_generation",
                     str(current_generation),
                 )
             return spawned
 
         return ProgramWriteService(
-            program_repository=bundle.programs,
+            programs=controller.programs,
             island_manager=island_manager,
             update_best_program=update_best_metadata,
-            update_metadata=bundle.programs.set_metadata,
+            update_metadata=controller.programs.set_metadata,
             recompute_embeddings=None,
             print_program_summary=None,
             maybe_spawn_island=maybe_spawn_island,
@@ -669,10 +668,10 @@ class AsyncProgramDatabase:
 
     def _build_thread_embedding_controller(
         self,
-        bundle: RepositoryBundle,
+        controller: DatabaseController,
     ) -> EmbeddingController:
         return EmbeddingController(
-            bundle.connector,
+            controller.connector,
             embedding_client_factory=self.ensure_embedding_client,
         )
 
@@ -680,27 +679,27 @@ class AsyncProgramDatabase:
         """Async fast program addition that defers expensive operations."""
 
         def add_program_sync():
-            bundle = None
+            controller = None
             try:
-                bundle = RepositoryBundle.open(
+                controller = DatabaseController.open(
                     db_path=self.db_path,
                     num_islands=self.num_islands,
                     read_only=False,
                 )
-                write_service = self._build_thread_write_service(bundle)
+                write_service = self._build_thread_write_service(controller)
                 result = write_service.add(
                     program,
                     verbose=False,
-                    current_last_iteration=bundle.programs.last_iteration,
+                    current_last_iteration=controller.programs.last_iteration,
                 )
                 self.update_last_iteration(result.last_iteration)
             except Exception as e:
                 logger.error(f"Error in add_program_sync: {e}")
                 raise
             finally:
-                if bundle:
+                if controller:
                     try:
-                        bundle.close()
+                        controller.close()
                     except Exception as e:
                         logger.warning(
                             f"Error closing thread database in add_program_sync: {e}"
@@ -748,19 +747,19 @@ class AsyncProgramDatabase:
             logger.error(f"Error in background embedding recomputation: {e}")
 
     def _recompute_embeddings_thread_safe(self) -> None:
-        bundle = None
+        controller = None
         try:
-            bundle = RepositoryBundle.open(
+            controller = DatabaseController.open(
                 db_path=self.db_path,
                 num_islands=self.num_islands,
                 read_only=False,
             )
-            controller = self._build_thread_embedding_controller(bundle)
-            controller.recompute()
+            embedding_controller = self._build_thread_embedding_controller(controller)
+            embedding_controller.recompute()
         finally:
-            if bundle:
+            if controller:
                 try:
-                    bundle.close()
+                    controller.close()
                 except Exception as e:
                     logger.warning(
                         f"Error closing thread database in embedding recompute: {e}"
@@ -778,7 +777,7 @@ class AsyncProgramDatabase:
                 thread_op_id = self._debug_track_start("get_thread_safe")
                 thread_db = None
                 try:
-                    thread_db = self._open_repository(read_only=True)
+                    thread_db = self._open_programs(read_only=True)
                     try:
                         result = thread_db.get(program_id)
                         self._debug_track_end(thread_op_id, success=True)
@@ -810,7 +809,7 @@ class AsyncProgramDatabase:
                 thread_op_id = self._debug_track_start("get_best_thread_safe")
                 thread_db = None
                 try:
-                    thread_db = self._open_repository(read_only=True)
+                    thread_db = self._open_programs(read_only=True)
                     try:
                         result = thread_db.get_best()
                         self._debug_track_end(thread_op_id, success=True)
@@ -942,7 +941,7 @@ class AsyncProgramDatabase:
         try:
             loop = asyncio.get_event_loop()
             def get_by_generation_thread_safe():
-                repo = self._open_repository(read_only=True)
+                repo = self._open_programs(read_only=True)
                 try:
                     return repo.list_by_generation(generation)
                 finally:
@@ -970,7 +969,7 @@ class AsyncProgramDatabase:
                 """Thread-safe program counting."""
                 thread_db = None
                 try:
-                    thread_db = self._open_repository(read_only=True)
+                    thread_db = self._open_programs(read_only=True)
                     return thread_db.get_count_snapshot().count
                 finally:
                     if thread_db:
@@ -1001,7 +1000,7 @@ class AsyncProgramDatabase:
         try:
             loop = asyncio.get_event_loop()
             def get_top_programs_thread_safe():
-                repo = self._open_repository(read_only=True)
+                repo = self._open_programs(read_only=True)
                 try:
                     return repo.list_top(n=n, correct_only=correct_only)
                 finally:
@@ -1044,7 +1043,7 @@ class AsyncProgramDatabase:
                 """Thread-safe percentile computation."""
                 repo = None
                 try:
-                    repo = self._open_repository(read_only=True)
+                    repo = self._open_programs(read_only=True)
                     programs = repo.list_correct() if correct_only else repo.list_all()
                     all_scores = [
                         p.combined_score

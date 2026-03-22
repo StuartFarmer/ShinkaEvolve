@@ -39,7 +39,7 @@ class CombinedIslandManager:
         island_elitism: bool,
         island_spawn_strategy: str,
         island_spawn_subtree_size: int,
-        program_repository: "ProgramController",
+        programs: "ProgramController",
         island_controller: IslandController,
         archive_policy: "ArchivePolicy",
     ):
@@ -49,8 +49,8 @@ class CombinedIslandManager:
         self.island_elitism = island_elitism
         self.island_spawn_strategy = island_spawn_strategy
         self.island_spawn_subtree_size = island_spawn_subtree_size
-        self.program_repository = program_repository
-        self.repository = island_controller
+        self.programs = programs
+        self.islands = island_controller
         self.archive_policy = archive_policy
 
     def assign_island(self, program: Any) -> None:
@@ -78,7 +78,7 @@ class CombinedIslandManager:
             return
 
         if program.parent_id:
-            parent_island = self.repository.get_program_island(program.parent_id)
+            parent_island = self.islands.get_program_island(program.parent_id)
             if parent_island is not None:
                 program.island_idx = parent_island
                 logger.debug(
@@ -148,7 +148,7 @@ class CombinedIslandManager:
                 )
                 migrations_summary[source_idx][dest_idx].append(migrant_id)
 
-        self.program_repository.commit()
+        self.programs.commit()
 
         if migrations_summary:
             self._print_migration_summary(migrations_summary)
@@ -162,13 +162,13 @@ class CombinedIslandManager:
         return total_migrated > 0
 
     def get_island_idx(self, program_id: str) -> Optional[int]:
-        return self.repository.get_program_island(program_id)
+        return self.islands.get_program_island(program_id)
 
     def get_initialized_islands(self) -> List[int]:
-        return self.repository.list_initialized_island_ids()
+        return self.islands.list_initialized_island_ids()
 
     def are_all_islands_initialized(self) -> bool:
-        return self.repository.are_all_islands_initialized()
+        return self.islands.are_all_islands_initialized()
 
     def should_schedule_migration(self, program: Any) -> bool:
         return (
@@ -178,7 +178,7 @@ class CombinedIslandManager:
         )
 
     def get_island_populations(self) -> Dict[int, int]:
-        return self.repository.get_island_populations()
+        return self.islands.get_island_populations()
 
     def get_migration_info(self) -> Optional[str]:
         if self.migration_interval <= 0:
@@ -208,7 +208,7 @@ class CombinedIslandManager:
 
         created_ids: List[str] = []
         for island_idx in range(1, self.num_islands):
-            new_id = self.program_repository.insert_program_copy_from_object(
+            new_id = self.programs.insert_program_copy_from_object(
                 program=program,
                 island_idx=island_idx,
                 metadata_updates={
@@ -225,7 +225,7 @@ class CombinedIslandManager:
                 island_idx,
             )
 
-        self.program_repository.commit()
+        self.programs.commit()
         logger.info(
             "Created %s copies of program %s for islands 1-%s",
             len(created_ids),
@@ -243,7 +243,7 @@ class CombinedIslandManager:
             )
             return False
 
-        new_island_idx = self.program_repository.get_next_island_index()
+        new_island_idx = self.islands.get_next_island_index()
         programs_to_copy = self._collect_subtree_programs(
             source_program,
             self.island_spawn_subtree_size,
@@ -260,7 +260,7 @@ class CombinedIslandManager:
             else:
                 new_parent_id = None
 
-            new_id = self.program_repository.insert_program_copy_from_row(
+            new_id = self.programs.insert_program_copy_from_row(
                 source_program=prog,
                 new_island_idx=new_island_idx,
                 new_parent_id=new_parent_id,
@@ -269,7 +269,7 @@ class CombinedIslandManager:
             )
             old_to_new_id[prog["id"]] = new_id
 
-        self.program_repository.commit()
+        self.programs.commit()
 
         source_id = source_program["id"][:8] + "..."
         if len(programs_to_copy) == 1:
@@ -291,10 +291,10 @@ class CombinedIslandManager:
         return True
 
     def _is_first_program(self) -> bool:
-        return self.repository.get_program_count() == 0
+        return self.islands.get_program_count() == 0
 
     def _count_island_programs(self, island_idx: int) -> int:
-        return self.program_repository.count_by_island(island_idx)
+        return self.programs.count_by_island(island_idx)
 
     def _select_migrants(
         self,
@@ -303,7 +303,7 @@ class CombinedIslandManager:
         num_migrants: int,
         island_elitism: bool,
     ) -> List[str]:
-        migrants = self.program_repository.list_migrant_ids(
+        migrants = self.programs.list_migrant_ids(
             source_idx=source_idx,
             num_migrants=num_migrants,
             island_elitism=island_elitism,
@@ -323,7 +323,7 @@ class CombinedIslandManager:
         dest_idx: int,
         current_generation: int,
     ) -> None:
-        self.program_repository.migrate_program(
+        self.programs.migrate_program(
             migrant_id=migrant_id,
             source_idx=source_idx,
             dest_idx=dest_idx,
@@ -356,7 +356,7 @@ class CombinedIslandManager:
         for source, destinations in sorted(migrations_summary.items()):
             for dest, program_ids in sorted(destinations.items()):
                 for program_id in program_ids:
-                    result = self.program_repository.get_program_brief(program_id)
+                    result = self.programs.get_program_brief(program_id)
                     if not result:
                         continue
                     metadata = result["metadata"]
@@ -377,19 +377,19 @@ class CombinedIslandManager:
 
     def _get_spawn_source_program(self, strategy: str) -> Optional[Dict]:
         if strategy == "initial":
-            return self.program_repository.get_initial_program_row()
+            return self.programs.get_initial_program_row()
         if strategy == "best":
-            return self.program_repository.get_best_program_row()
+            return self.programs.get_best_program_row()
         if strategy == "archive_random":
             program = self.archive_policy.pick_random(
-                self.program_repository.list_correct()
+                self.programs.list_correct()
             )
             return program.to_dict() if program is not None else None
         logger.warning(
             "Unknown island_spawn_strategy '%s', falling back to 'initial'",
             strategy,
         )
-        return self.program_repository.get_initial_program_row()
+        return self.programs.get_initial_program_row()
 
     def _collect_subtree_programs(self, root_program: Dict, max_size: int) -> List[Dict]:
         if max_size <= 1:
@@ -401,7 +401,7 @@ class CombinedIslandManager:
 
         while queue and remaining > 0:
             current = queue.pop(0)
-            children = self.program_repository.get_correct_child_rows(
+            children = self.programs.get_correct_child_rows(
                 current["id"],
                 limit=remaining,
             )

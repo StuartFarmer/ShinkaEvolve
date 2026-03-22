@@ -7,7 +7,7 @@ from shinka.database import Program
 from shinka.database.archive_policy import create_archive_policy
 from shinka.database.islands import CombinedIslandManager
 from shinka.database.program_write_service import ProgramWriteService
-from shinka.database.repository_bundle import RepositoryBundle
+from shinka.controllers import DatabaseController
 
 
 class RuntimeHarness:
@@ -20,13 +20,13 @@ class RuntimeHarness:
         stagnation_threshold: int,
         island_spawn_strategy: str = "initial",
     ) -> None:
-        self.bundle = RepositoryBundle.open(
+        self.controller = DatabaseController.open(
             db_path=db_path,
             num_islands=num_islands,
             read_only=False,
         )
-        self.program_repository = self.bundle.programs
-        self.metadata_repo = self.bundle.metadata
+        self.programs = self.controller.programs
+        self.metadata_repo = self.controller.run_state
         self.num_islands = num_islands
         self.enable_dynamic_islands = enable_dynamic_islands
         self.stagnation_threshold = stagnation_threshold
@@ -47,15 +47,15 @@ class RuntimeHarness:
             island_elitism=True,
             island_spawn_strategy=island_spawn_strategy,
             island_spawn_subtree_size=1,
-            program_repository=self.program_repository,
-            island_controller=self.bundle.controller.islands,
+            programs=self.programs,
+            island_controller=self.controller.islands,
             archive_policy=self.archive_policy,
         )
         self.write_service = ProgramWriteService(
-            program_repository=self.program_repository,
+            programs=self.programs,
             island_manager=self.island_manager,
             update_best_program=self._update_best_program,
-            update_metadata=self.program_repository.set_metadata,
+            update_metadata=self.programs.set_metadata,
             recompute_embeddings=None,
             print_program_summary=None,
             maybe_spawn_island=self.check_and_spawn_island_if_stagnant,
@@ -65,7 +65,7 @@ class RuntimeHarness:
         if not program.correct:
             return
         current_best = (
-            self.program_repository.get(self.best_program_id)
+            self.programs.get(self.best_program_id)
             if self.best_program_id
             else None
         )
@@ -75,15 +75,15 @@ class RuntimeHarness:
         new_score = float(program.combined_score or 0.0)
         if current_best_score is None or new_score > current_best_score:
             self.best_program_id = program.id
-            self.program_repository.set_metadata("best_program_id", program.id)
+            self.programs.set_metadata("best_program_id", program.id)
             if self.best_score_ever is None or new_score > self.best_score_ever:
                 self.best_score_ever = new_score
                 self.best_score_generation = program.generation
-                self.program_repository.set_metadata(
+                self.programs.set_metadata(
                     "best_score_generation",
                     str(self.best_score_generation),
                 )
-                self.program_repository.set_metadata(
+                self.programs.set_metadata(
                     "best_score_ever",
                     str(self.best_score_ever),
                 )
@@ -107,14 +107,14 @@ class RuntimeHarness:
         spawned = self.island_manager.spawn_new_island()
         if spawned:
             self.best_score_generation = current_generation
-            self.program_repository.set_metadata(
+            self.programs.set_metadata(
                 "best_score_generation",
                 str(self.best_score_generation),
             )
         return spawned
 
     def close(self) -> None:
-        self.bundle.close()
+        self.controller.close()
 
 
 def test_stagnation_detection():
@@ -325,7 +325,7 @@ def test_spawn_strategies():
             assert len(final_islands) > 2
 
             spawned_island_idx = max(final_islands.keys())
-            spawned = runtime.program_repository.list_by_island(spawned_island_idx)
+            spawned = runtime.programs.list_by_island(spawned_island_idx)
             assert spawned
             metadata = spawned[0].metadata or {}
             assert metadata.get("_spawn_strategy") == strategy

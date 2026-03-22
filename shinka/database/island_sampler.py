@@ -18,9 +18,9 @@ class IslandSampler(ABC):
 
     def __init__(
         self,
-        program_repository: "ProgramController",
+        programs: "ProgramController",
     ):
-        self.program_repository = program_repository
+        self.programs = programs
 
     @abstractmethod
     def sample_island(self, initialized_islands: List[Island]) -> int:
@@ -36,7 +36,7 @@ class IslandSampler(ABC):
 
     def _normalize_islands(self, initialized_islands: List[Island | int]) -> List[Island]:
         island_map = {
-            island.island_idx: island for island in self.program_repository.list_islands()
+            island.island_idx: island for island in self.programs.list_islands()
         }
         normalized: List[Island] = []
         for island in initialized_islands:
@@ -88,10 +88,10 @@ class ProportionalIslandSampler(IslandSampler):
 
     def __init__(
         self,
-        program_repository: "ProgramController",
+        programs: "ProgramController",
         temperature: float = 1.0,
     ):
-        super().__init__(program_repository)
+        super().__init__(programs)
         self.temperature = temperature
 
     def sample_island(self, initialized_islands: List[Island | int]) -> int:
@@ -125,11 +125,11 @@ class WeightedIslandSampler(IslandSampler):
 
     def __init__(
         self,
-        program_repository: "ProgramController",
+        programs: "ProgramController",
         fitness_weight: float = 1.0,
         count_weight: float = 1.0,
     ):
-        super().__init__(program_repository)
+        super().__init__(programs)
         self.fitness_weight = fitness_weight
         self.count_weight = count_weight
 
@@ -169,13 +169,13 @@ class WeightedIslandSampler(IslandSampler):
 
 
 def create_island_sampler(
-    program_repository: "ProgramController",
+    programs: "ProgramController",
     strategy: str = "uniform",
 ) -> IslandSampler:
     """Factory function to create island samplers.
 
     Args:
-        program_repository: Program repository
+        programs: Program controller
         strategy: Sampling strategy name
 
     Returns:
@@ -185,14 +185,14 @@ def create_island_sampler(
         ValueError: If strategy is unknown
     """
     if strategy == "uniform":
-        return UniformIslandSampler(program_repository)
+        return UniformIslandSampler(programs)
     elif strategy == "equal":
-        return EqualIslandSampler(program_repository)
+        return EqualIslandSampler(programs)
     elif strategy == "proportional":
-        return ProportionalIslandSampler(program_repository, temperature=1.0)
+        return ProportionalIslandSampler(programs, temperature=1.0)
     elif strategy == "weighted":
         return WeightedIslandSampler(
-            program_repository,
+            programs,
             fitness_weight=1.0,
             count_weight=1.0,
         )

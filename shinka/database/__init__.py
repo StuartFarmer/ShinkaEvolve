@@ -3,7 +3,6 @@ __all__ = [
     "DatabaseConfig",
     "DatabaseConnector",
     "AsyncProgramDatabase",
-    "RepositoryBundle",
     "InspirationUse",
     "ProgramCountSnapshot",
     "RunMetadataSnapshot",
@@ -42,10 +41,6 @@ def __getattr__(name):
         from shinka.controllers.types import ProgramCountSnapshot
 
         return ProgramCountSnapshot
-    if name == "RepositoryBundle":
-        from .repository_bundle import RepositoryBundle
-
-        return RepositoryBundle
     if name == "InspirationUse":
         from shinka.controllers.types import InspirationUse
 

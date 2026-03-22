@@ -213,7 +213,7 @@ class AsyncNoveltyJudge:
     ) -> List[float]:
         if self.db_path is None:
             return []
-        repository = DatabaseController(
+        programs = DatabaseController(
             DatabaseConnector.open(
                 db_path=self.db_path,
                 num_islands=self.num_islands,
@@ -221,19 +221,19 @@ class AsyncNoveltyJudge:
             )
         ).programs
         try:
-            return SimilarityService(repository).compute_similarity(
+            return SimilarityService(programs).compute_similarity(
                 code_embedding,
                 island_idx,
             )
         finally:
-            repository.close()
+            programs.close()
 
     def _get_most_similar_program_thread_safe(
         self, code_embedding: List[float], island_idx: int
     ) -> Optional[Program]:
         if self.db_path is None:
             return None
-        repository = DatabaseController(
+        programs = DatabaseController(
             DatabaseConnector.open(
                 db_path=self.db_path,
                 num_islands=self.num_islands,
@@ -241,12 +241,12 @@ class AsyncNoveltyJudge:
             )
         ).programs
         try:
-            return SimilarityService(repository).get_most_similar_program(
+            return SimilarityService(programs).get_most_similar_program(
                 code_embedding,
                 island_idx,
             )
         finally:
-            repository.close()
+            programs.close()
 
     async def _check_llm_novelty_async(
         self, proposed_code: str, most_similar_program: Program

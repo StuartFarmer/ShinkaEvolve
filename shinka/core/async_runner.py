@@ -33,7 +33,6 @@ from shinka.database.prompt_dbase import (
     SystemPromptConfig,
     create_system_prompt,
 )
-from shinka.database.repository_bundle import RepositoryBundle
 from shinka.llm import (
     AsyncLLMClient,
     extract_between,
@@ -367,8 +366,8 @@ class ShinkaEvolveRunner:
 
         # Database-backed services are initialized in _setup_async() once the
         # results directory is finalized.
-        self.repository_bundle: Optional[RepositoryBundle] = None
-        self.program_repository: Optional[ProgramController] = None
+        self.database_controller: Optional[DatabaseController] = None
+        self.programs: Optional[ProgramController] = None
         self.metadata_repo = None
         self.island_repo = None
         self.archive_policy = None
@@ -564,7 +563,7 @@ class ShinkaEvolveRunner:
                 results_dir,
             )
 
-    def _open_repository(self, *, read_only: bool) -> ProgramController:
+    def _open_programs(self, *, read_only: bool) -> ProgramController:
         return DatabaseController(
             DatabaseConnector.open(
                 db_path=self.db_path,
@@ -596,8 +595,8 @@ class ShinkaEvolveRunner:
 
     def _update_runtime_last_iteration(self, value: int) -> None:
         self.runtime_last_iteration = max(self.runtime_last_iteration, int(value))
-        if self.program_repository is not None:
-            self.program_repository.last_iteration = self.runtime_last_iteration
+        if self.programs is not None:
+            self.programs.last_iteration = self.runtime_last_iteration
         if self.database_display is not None:
             self.database_display.set_last_iteration(self.runtime_last_iteration)
 
@@ -627,14 +626,14 @@ class ShinkaEvolveRunner:
         self.database_display.print_summary(console=self.console)
 
     def _build_runtime_services(self) -> None:
-        self.repository_bundle = RepositoryBundle.open(
+        self.database_controller = DatabaseController.open(
             db_path=self.db_path,
             num_islands=self.num_islands,
             read_only=False,
         )
-        self.program_repository = self.repository_bundle.programs
-        self.metadata_repo = self.repository_bundle.controller.run_state
-        self.island_repo = self.repository_bundle.controller.islands
+        self.programs = self.database_controller.programs
+        self.metadata_repo = self.database_controller.run_state
+        self.island_repo = self.database_controller.islands
 
         snapshot = self.metadata_repo.load_snapshot()
         self.runtime_last_iteration = snapshot.last_iteration
@@ -656,12 +655,12 @@ class ShinkaEvolveRunner:
             island_elitism=self.island_elitism,
             island_spawn_strategy=self.island_spawn_strategy,
             island_spawn_subtree_size=self.island_spawn_subtree_size,
-            program_repository=self.program_repository,
+            programs=self.programs,
             island_controller=self.island_repo,
             archive_policy=self.archive_policy,
         )
         self.database_display = DatabaseDisplay(
-            program_repository=self.program_repository,
+            programs=self.programs,
             archive_size=self.archive_size,
             num_islands=self.num_islands,
             island_manager=self.island_manager,
@@ -779,7 +778,7 @@ class ShinkaEvolveRunner:
             """Thread-safe computation of total costs from persisted programs."""
             repo = None
             try:
-                repo = self._open_repository(read_only=True)
+                repo = self._open_programs(read_only=True)
                 total_costs = 0.0
                 for program in repo.list_all():
                     metadata = program.metadata or {}
@@ -1114,12 +1113,12 @@ class ShinkaEvolveRunner:
                     )
                 await self._generate_initial_program()
 
-    def _list_all_programs_via_repository(self) -> list[Program]:
-        repository = self._open_repository(read_only=True)
+    def _list_all_programs_via_controller(self) -> list[Program]:
+        programs = self._open_programs(read_only=True)
         try:
-            return repository.list_all()
+            return programs.list_all()
         finally:
-            repository.close()
+            programs.close()
 
     async def _setup_prompt_evolution(self):
         """Setup prompt evolution database and components."""
@@ -1268,7 +1267,7 @@ class ShinkaEvolveRunner:
                 try:
                     # Get all correct program scores from main database
                     # This matches what the webUI uses for beat percentage calculation
-                    all_programs = self._list_all_programs_via_repository()
+                    all_programs = self._list_all_programs_via_controller()
                     all_correct_scores = [
                         p.combined_score
                         for p in all_programs
@@ -1423,7 +1422,7 @@ class ShinkaEvolveRunner:
         """Persist metadata updates for a stored initial program."""
 
         def update_metadata():
-            repo = self._open_repository(read_only=False)
+            repo = self._open_programs(read_only=False)
             try:
                 repo.update_program_metadata(
                     initial_program.id,
@@ -3630,7 +3629,7 @@ class ShinkaEvolveRunner:
 
                                 # Update the program in the database
                                 def update_metadata():
-                                    repo = self._open_repository(read_only=False)
+                                    repo = self._open_programs(read_only=False)
                                     try:
                                         repo.update_program_metadata(
                                             program.id,
@@ -4091,10 +4090,10 @@ class ShinkaEvolveRunner:
                 )
 
             # Final recomputation of prompt percentiles to ensure fitness is accurate
-            if self.prompt_db is not None and self.program_repository is not None:
+            if self.prompt_db is not None and self.programs is not None:
                 try:
                     # Get all correct program scores from main database
-                    all_programs = self._list_all_programs_via_repository()
+                    all_programs = self._list_all_programs_via_controller()
                     all_correct_scores = [
                         p.combined_score
                         for p in all_programs
@@ -4118,9 +4117,9 @@ class ShinkaEvolveRunner:
 
             # Cleanup database
             await self.async_db.close_async()
-            if self.repository_bundle is not None:
-                self.repository_bundle.close()
-                self.repository_bundle = None
+            if self.database_controller is not None:
+                self.database_controller.close()
+                self.database_controller = None
 
             # Cleanup scheduler
             self.scheduler.shutdown()

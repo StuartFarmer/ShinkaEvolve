@@ -20,7 +20,7 @@ def _program(program_id: str) -> Program:
 
 
 def test_program_database_init_without_openai_key(monkeypatch):
-    """Repository-backed storage construction should not require API credentials."""
+    """Controller-backed storage construction should not require API credentials."""
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     with tempfile.TemporaryDirectory() as tmpdir:

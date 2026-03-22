@@ -1,7 +1,7 @@
 """Deprecated compatibility layer for inspiration selection.
 
 Inspiration selection now lives in `shinka.core.search_policies.InspirationSelector`
-and works over repository-returned `Program` objects plus computed archive state.
+and works over controller-returned `Program` objects plus computed archive state.
 This module remains only for older imports while the migration completes.
 """
 
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 class CombinedContextSelector:
-    """Deprecated shim for repository-backed inspiration selection."""
+    """Deprecated shim for controller-backed inspiration selection."""
 
     def __init__(
         self,
@@ -53,10 +53,10 @@ class CombinedContextSelector:
             "CombinedContextSelector is deprecated. Use shinka.core.search_policies.InspirationSelector."
         )
 
-    def _repository(self) -> ProgramController:
+    def _programs(self) -> ProgramController:
         if not self.db_path:
             raise RuntimeError(
-                "Legacy CombinedContextSelector requires config.db_path for repository-backed sampling."
+                "Legacy CombinedContextSelector requires config.db_path for controller-backed sampling."
             )
         warnings.warn(
             "CombinedContextSelector is deprecated; use DatabaseController().programs + "
@@ -75,11 +75,11 @@ class CombinedContextSelector:
     def sample_context(
         self, parent: Any, num_archive: int, num_topk: int
     ) -> tuple[List[Any], List[Any]]:
-        repository = self._repository()
+        programs = self._programs()
         try:
-            archive = self.archive_policy.compute(repository.list_correct())
+            archive = self.archive_policy.compute(programs.list_correct())
             archive_inspirations = self.selector.select_archive(
-                repository,
+                programs,
                 parent,
                 archive,
                 n=num_archive,
@@ -92,7 +92,7 @@ class CombinedContextSelector:
             )
             return archive_inspirations, top_k_inspirations
         finally:
-            repository.close()
+            programs.close()
 
 
 class InspirationContextBuilder:

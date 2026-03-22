@@ -14,6 +14,22 @@ from .run_state_controller import RunStateController
 class DatabaseController:
     """Master controller facade for model-scoped controllers."""
 
+    @classmethod
+    def open(
+        cls,
+        *,
+        db_path: str | None = None,
+        num_islands: int = 2,
+        read_only: bool = False,
+    ) -> "DatabaseController":
+        return cls(
+            DatabaseConnector.open(
+                db_path=db_path,
+                num_islands=num_islands,
+                read_only=read_only,
+            )
+        )
+
     def __init__(self, connector: DatabaseConnector) -> None:
         self.connector = connector
         self._bootstrap()

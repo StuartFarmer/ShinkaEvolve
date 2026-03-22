@@ -1,7 +1,7 @@
 """Deprecated compatibility layer for parent selection.
 
 Parent-selection logic now lives in `shinka.core.search_policies.ParentSelector`
-and operates on repository-backed `Program` objects instead of raw SQLite rows.
+and operates on controller-returned `Program` objects instead of raw SQLite rows.
 This module remains only to avoid breaking older imports while the rest of the
 codebase migrates.
 """
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 class CombinedParentSelector:
-    """Deprecated shim that forwards parent sampling to the repository-backed policy layer."""
+    """Deprecated shim that forwards parent sampling to the controller policy layer."""
 
     def __init__(
         self,
@@ -60,10 +60,10 @@ class CombinedParentSelector:
             "CombinedParentSelector is deprecated. Use shinka.core.search_policies.ParentSelector."
         )
 
-    def _repository(self) -> ProgramController:
+    def _programs(self) -> ProgramController:
         if not self.db_path:
             raise RuntimeError(
-                "Legacy CombinedParentSelector requires config.db_path for repository-backed sampling."
+                "Legacy CombinedParentSelector requires config.db_path for controller-backed sampling."
             )
         warnings.warn(
             "CombinedParentSelector is deprecated; use DatabaseController().programs + "
@@ -80,45 +80,45 @@ class CombinedParentSelector:
         ).programs
 
     def has_correct_programs(self, island_idx: Optional[int] = None) -> bool:
-        repository = self._repository()
+        programs = self._programs()
         try:
-            return self.selector.has_correct_programs(repository, island_idx=island_idx)
+            return self.selector.has_correct_programs(programs, island_idx=island_idx)
         finally:
-            repository.close()
+            programs.close()
 
     def get_incorrect_program_for_fix(
         self, island_idx: Optional[int] = None
     ) -> Optional[Any]:
-        repository = self._repository()
+        programs = self._programs()
         try:
             return self.selector.get_incorrect_program_for_fix(
-                repository, island_idx=island_idx
+                programs, island_idx=island_idx
             )
         finally:
-            repository.close()
+            programs.close()
 
     def sample_parent_with_fix_mode(
         self, island_idx: Optional[int] = None
     ) -> Tuple[Any, bool]:
-        repository = self._repository()
+        programs = self._programs()
         try:
-            archive = self.archive_policy.compute(repository.list_correct())
+            archive = self.archive_policy.compute(programs.list_correct())
             return self.selector.select_with_fix_mode(
-                repository,
+                programs,
                 archive,
                 island_idx=island_idx,
             )
         finally:
-            repository.close()
+            programs.close()
 
     def sample_parent(self, island_idx: Optional[int] = None) -> Any:
-        repository = self._repository()
+        programs = self._programs()
         try:
-            archive = self.archive_policy.compute(repository.list_correct())
+            archive = self.archive_policy.compute(programs.list_correct())
             return self.selector.select(
-                repository,
+                programs,
                 archive,
                 island_idx=island_idx,
             )
         finally:
-            repository.close()
+            programs.close()

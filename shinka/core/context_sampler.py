@@ -49,11 +49,11 @@ class SampledContext:
 
 
 class ContextSampler:
-    """Repository-backed context sampler for one proposal attempt."""
+    """Controller-backed context sampler for one proposal attempt."""
 
     def __init__(
         self,
-        repository: ProgramController,
+        programs: ProgramController,
         *,
         archive_policy: Optional[ArchivePolicy] = None,
         parent_selector: Optional[ParentSelector] = None,
@@ -69,9 +69,9 @@ class ContextSampler:
         enforce_island_separation: bool = True,
         elite_selection_ratio: float = 0.3,
     ):
-        self.repository = repository
+        self.programs = programs
         self.num_islands = (
-            repository.num_islands if num_islands is None else num_islands
+            programs.num_islands if num_islands is None else num_islands
         )
 
         self.island_selection_strategy = island_selection_strategy
@@ -109,19 +109,19 @@ class ContextSampler:
                 with_fix_mode=with_fix_mode,
             )
 
-        initialized_islands = self.repository.list_initialized_islands()
+        initialized_islands = self.programs.list_initialized_islands()
         sampled_island = self._sample_island(initialized_islands)
 
         archive_programs = self._compute_archive()
         if with_fix_mode:
             parent, needs_fix = self.parent_selector.select_with_fix_mode(
-                self.repository,
+                self.programs,
                 archive_programs,
                 island_idx=sampled_island,
             )
         else:
             parent = self.parent_selector.select(
-                self.repository,
+                self.programs,
                 archive_programs,
                 island_idx=sampled_island,
             )
@@ -129,7 +129,7 @@ class ContextSampler:
 
         if needs_fix:
             num_ancestors = self.num_archive_inspirations + self.num_top_k_inspirations
-            ancestor_inspirations = self.repository.get_ancestry(
+            ancestor_inspirations = self.programs.get_ancestry(
                 parent.id,
                 max_ancestors=num_ancestors,
             )
@@ -149,7 +149,7 @@ class ContextSampler:
         num_archive = self.num_archive_inspirations
         num_topk = self.num_top_k_inspirations
         archive_inspirations = self.inspiration_selector.select_archive(
-            self.repository,
+            self.programs,
             parent,
             archive_programs,
             n=num_archive,
@@ -175,10 +175,10 @@ class ContextSampler:
         )
 
     def _compute_archive(self) -> List[Program]:
-        return self.archive_policy.compute(self.repository.list_correct())
+        return self.archive_policy.compute(self.programs.list_correct())
 
     def _are_all_islands_initialized(self) -> bool:
-        initialized = self.repository.list_initialized_island_ids()
+        initialized = self.programs.list_initialized_island_ids()
         if not initialized:
             return False
         num_islands = int(self.num_islands)
@@ -196,17 +196,17 @@ class ContextSampler:
         max_resample_attempts: Optional[int],
         with_fix_mode: bool,
     ) -> SampledContext:
-        correct_programs = self.repository.list_correct()
+        correct_programs = self.programs.list_correct()
 
         if correct_programs:
-            parent = self.repository.get_earliest()
+            parent = self.programs.get_earliest()
             if parent is None:
-                raise RuntimeError("No programs found in repository")
+                raise RuntimeError("No programs found in program controller")
             needs_fix = with_fix_mode and not parent.correct
             archive_inspirations: List[Program] = []
             if needs_fix:
                 num_ancestors = self.num_archive_inspirations + self.num_top_k_inspirations
-                archive_inspirations = self.repository.get_ancestry(
+                archive_inspirations = self.programs.get_ancestry(
                     parent.id,
                     max_ancestors=num_ancestors,
                 )
@@ -223,12 +223,12 @@ class ContextSampler:
                 max_resample_attempts=max_resample_attempts,
             )
 
-        incorrect_programs = self.repository.list_incorrect()
+        incorrect_programs = self.programs.list_incorrect()
         if incorrect_programs:
             parent = random.choice(incorrect_programs)
             num_ancestors = self.num_archive_inspirations + self.num_top_k_inspirations
             archive_inspirations = (
-                self.repository.get_ancestry(parent.id, max_ancestors=num_ancestors)
+                self.programs.get_ancestry(parent.id, max_ancestors=num_ancestors)
                 if with_fix_mode
                 else []
             )
@@ -245,9 +245,9 @@ class ContextSampler:
                 max_resample_attempts=max_resample_attempts,
             )
 
-        parent = self.repository.get_earliest()
+        parent = self.programs.get_earliest()
         if parent is None:
-            raise RuntimeError("No programs found in repository")
+            raise RuntimeError("No programs found in program controller")
         return SampledContext(
             parent=parent,
             archive_inspirations=[],
@@ -316,7 +316,7 @@ class AsyncContextSampler:
     """
     Async sibling for the async runner.
 
-    Each call opens a fresh read-only repository, which keeps sampling isolated
+    Each call opens a fresh read-only controller, which keeps sampling isolated
     from concurrent writer state and avoids shared-cursor coupling.
     """
 
@@ -359,7 +359,7 @@ class AsyncContextSampler:
         with_fix_mode: bool = True,
     ) -> SampledContext:
         async with self._lock:
-            repository = DatabaseController(
+            programs = DatabaseController(
                 DatabaseConnector.open(
                     db_path=self.db_path,
                     num_islands=self.num_islands,
@@ -368,7 +368,7 @@ class AsyncContextSampler:
             ).programs
             try:
                 sampler = ContextSampler(
-                    repository,
+                    programs,
                     num_islands=self.num_islands,
                     island_selection_strategy=self.island_selection_strategy,
                     num_archive_inspirations=self.num_archive_inspirations,
@@ -389,4 +389,4 @@ class AsyncContextSampler:
                     with_fix_mode=with_fix_mode,
                 )
             finally:
-                repository.close()
+                programs.close()

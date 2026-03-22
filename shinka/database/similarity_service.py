@@ -35,14 +35,14 @@ def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
 
 class SimilarityService:
     """
-    Repository-backed embedding similarity queries.
+    Controller-backed embedding similarity queries.
 
     This owns vector math and nearest-neighbor lookup. It does not own novelty
     policy; callers decide what to do with the returned similarities.
     """
 
-    def __init__(self, repository: "ProgramController"):
-        self.repository = repository
+    def __init__(self, programs: "ProgramController"):
+        self.programs = programs
 
     def compute_similarity(
         self,
@@ -53,7 +53,7 @@ class SimilarityService:
             logger.warning("Empty code embedding provided to compute_similarity")
             return []
 
-        rows = self.repository.list_embeddings_by_island(island_idx)
+        rows = self.programs.list_embeddings_by_island(island_idx)
         return [
             cosine_similarity(code_embedding, embedding)
             for _, embedding in rows
@@ -71,14 +71,14 @@ class SimilarityService:
             )
             return None
 
-        rows = self.repository.list_embeddings_by_island(island_idx)
+        rows = self.programs.list_embeddings_by_island(island_idx)
         best: Optional[SimilarProgram] = None
         for program_id, embedding in rows:
             if not embedding:
                 continue
             similarity = cosine_similarity(code_embedding, embedding)
             if best is None or similarity > best.similarity:
-                program = self.repository.get(program_id)
+                program = self.programs.get(program_id)
                 if program is not None:
                     best = SimilarProgram(program=program, similarity=similarity)
         return None if best is None else best.program

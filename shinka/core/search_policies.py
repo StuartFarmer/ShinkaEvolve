@@ -1,7 +1,7 @@
 """
 Search-policy services used by context sampling.
 
-These classes consume controller state and computed archive state. They do not
+These classes consume database state and computed archive state. They do not
 own persistence.
 """
 
@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import logging
 import random
-from typing import Any, List, Optional, Sequence
+from typing import List, Optional, Sequence
 
 import numpy as np
 
+from shinka.database import program_reads, run_state_ops
+from shinka.database.connection import Database
 from shinka.database.program import Program
-from shinka.controllers.program_controller import ProgramController
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,7 @@ def _sort_programs_by_score(programs: Sequence[Program]) -> List[Program]:
 
 
 class ParentSelector:
-    """Controller-backed parent selection policy."""
+    """Database-backed parent selection policy."""
 
     def __init__(
         self,
@@ -71,43 +72,42 @@ class ParentSelector:
 
     def has_correct_programs(
         self,
-        programs: ProgramController,
+        db: Database,
         *,
         island_idx: Optional[int] = None,
     ) -> bool:
-        return bool(programs.list_correct(island_idx=island_idx))
+        with db.session() as session:
+            return bool(program_reads.list_correct(session, island_idx=island_idx))
 
     def get_incorrect_program_for_fix(
         self,
-        programs: ProgramController,
+        db: Database,
         *,
         island_idx: Optional[int] = None,
     ) -> Optional[Program]:
-        incorrect = programs.list_incorrect(island_idx=island_idx)
+        with db.session() as session:
+            incorrect = program_reads.list_incorrect(session, island_idx=island_idx)
         if not incorrect:
             return None
         return random.choice(incorrect)
 
     def select_with_fix_mode(
         self,
-        programs: ProgramController,
+        db: Database,
         archive_programs: Sequence[Program],
         *,
         island_idx: Optional[int] = None,
     ) -> tuple[Program, bool]:
-        if not self.has_correct_programs(programs, island_idx=island_idx):
-            incorrect = self.get_incorrect_program_for_fix(
-                programs,
-                island_idx=island_idx,
-            )
+        if not self.has_correct_programs(db, island_idx=island_idx):
+            incorrect = self.get_incorrect_program_for_fix(db, island_idx=island_idx)
             if incorrect is not None:
                 return incorrect, True
             raise ValueError("No programs available to sample or fix.")
-        return self.select(programs, archive_programs, island_idx=island_idx), False
+        return self.select(db, archive_programs, island_idx=island_idx), False
 
     def select(
         self,
-        programs: ProgramController,
+        db: Database,
         archive_programs: Sequence[Program],
         *,
         island_idx: Optional[int] = None,
@@ -115,32 +115,34 @@ class ParentSelector:
         strategy_name = self.parent_selection_strategy
 
         if strategy_name == "power_law":
-            parent = self._select_power_law(programs, archive_programs, island_idx)
+            parent = self._select_power_law(db, archive_programs, island_idx)
         elif strategy_name == "weighted":
-            parent = self._select_weighted(programs, archive_programs, island_idx)
+            parent = self._select_weighted(db, archive_programs, island_idx)
         elif strategy_name == "beam_search":
-            parent = self._select_beam_search(programs, island_idx)
+            parent = self._select_beam_search(db, island_idx)
         elif strategy_name == "best_of_n":
-            parent = self._select_best_of_n(programs, island_idx)
+            parent = self._select_best_of_n(db, island_idx)
         elif strategy_name == "winner_take_all":
-            parent = self._select_winner_take_all(programs, island_idx)
+            parent = self._select_winner_take_all(db, island_idx)
         elif strategy_name == "sequential":
-            parent = self._select_sequential(programs, island_idx)
+            parent = self._select_sequential(db, island_idx)
         else:
             raise ValueError(f"Unknown parent selection strategy: {strategy_name}")
 
         if parent is not None:
             return parent
 
-        fallback = programs.get_best(island_idx=island_idx)
+        with db.session() as session:
+            fallback = program_reads.get_best(session, island_idx=island_idx)
         if fallback is not None:
             return fallback
 
-        fallback = programs.get_most_recent(island_idx=island_idx)
+        with db.session() as session:
+            fallback = program_reads.get_most_recent(session, island_idx=island_idx)
         if fallback is not None:
             return fallback
 
-        raise ValueError("Program controller is empty or parent sampling failed.")
+        raise ValueError("Database is empty or parent sampling failed.")
 
     def _archive_candidates(
         self,
@@ -154,14 +156,17 @@ class ParentSelector:
 
     def _correct_candidates(
         self,
-        programs: ProgramController,
+        db: Database,
         island_idx: Optional[int],
     ) -> List[Program]:
-        return _sort_programs_by_score(programs.list_correct(island_idx=island_idx))
+        with db.session() as session:
+            return _sort_programs_by_score(
+                program_reads.list_correct(session, island_idx=island_idx)
+            )
 
     def _select_power_law(
         self,
-        programs: ProgramController,
+        db: Database,
         archive_programs: Sequence[Program],
         island_idx: Optional[int],
     ) -> Optional[Program]:
@@ -169,21 +174,23 @@ class ParentSelector:
         if candidates:
             return _sample_with_powerlaw(candidates, self.exploitation_alpha)
 
-        candidates = self._correct_candidates(programs, island_idx)
+        candidates = self._correct_candidates(db, island_idx)
         if candidates:
             return _sample_with_powerlaw(candidates, self.exploitation_alpha)
 
-        return programs.get_best(island_idx=island_idx)
+        with db.session() as session:
+            return program_reads.get_best(session, island_idx=island_idx)
 
     def _select_weighted(
         self,
-        programs: ProgramController,
+        db: Database,
         archive_programs: Sequence[Program],
         island_idx: Optional[int],
     ) -> Optional[Program]:
         candidates = self._archive_candidates(archive_programs, island_idx)
         if not candidates:
-            return programs.get_best(island_idx=island_idx)
+            with db.session() as session:
+                return program_reads.get_best(session, island_idx=island_idx)
 
         scores = [float(program.combined_score or 0.0) for program in candidates]
         alpha_0 = float(np.median(scores)) if scores else 0.0
@@ -210,68 +217,84 @@ class ParentSelector:
 
     def _select_beam_search(
         self,
-        programs: ProgramController,
+        db: Database,
         island_idx: Optional[int],
     ) -> Optional[Program]:
         num_beams = int(self.num_beams)
-        beam_parent_id = programs.get_metadata("beam_search_parent_id")
+        with db.session_scope() as session:
+            beam_parent_id = run_state_ops.get(session, "beam_search_parent_id")
 
-        if beam_parent_id:
-            beam_parent = programs.get(beam_parent_id)
-            if beam_parent is not None and (
-                island_idx is None or beam_parent.island_idx == island_idx
-            ):
-                children_count = programs.get_children_count(beam_parent.id)
-                if children_count < num_beams:
-                    return beam_parent
+            if beam_parent_id:
+                beam_parent = program_reads.get(session, beam_parent_id)
+                if beam_parent is not None and (
+                    island_idx is None or beam_parent.island_idx == island_idx
+                ):
+                    children_count = program_reads.get_children_count(session, beam_parent.id)
+                    if children_count < num_beams:
+                        return beam_parent
 
-        best_program = programs.get_best(island_idx=island_idx)
-        if best_program is not None:
-            if not programs.read_only:
-                programs.set_metadata("beam_search_parent_id", best_program.id)
-            return best_program
+            best_program = program_reads.get_best(session, island_idx=island_idx)
+            if best_program is not None:
+                if not db.read_only:
+                    run_state_ops.set(session, "beam_search_parent_id", best_program.id)
+                return best_program
         return None
 
     def _select_best_of_n(
         self,
-        programs: ProgramController,
+        db: Database,
         island_idx: Optional[int],
     ) -> Optional[Program]:
-        candidates = programs.list_by_island(island_idx, correct_only=True) if island_idx is not None else programs.list_correct()
-        generation_zero = [
-            program for program in candidates if program.generation == 0 and program.correct
-        ]
-        generation_zero = sorted(
-            generation_zero,
-            key=lambda program: (program.generation, program.timestamp, program.id),
-        )
-        if generation_zero:
-            return generation_zero[0]
-        return programs.get_earliest(correct_only=True, island_idx=island_idx)
+        with db.session() as session:
+            candidates = (
+                program_reads.list_by_island(session, island_idx, correct_only=True)
+                if island_idx is not None
+                else program_reads.list_correct(session)
+            )
+            generation_zero = [
+                program for program in candidates if program.generation == 0 and program.correct
+            ]
+            generation_zero = sorted(
+                generation_zero,
+                key=lambda program: (program.generation, program.timestamp, program.id),
+            )
+            if generation_zero:
+                return generation_zero[0]
+            return program_reads.get_earliest(session, correct_only=True, island_idx=island_idx)
 
     def _select_winner_take_all(
         self,
-        programs: ProgramController,
+        db: Database,
         island_idx: Optional[int],
     ) -> Optional[Program]:
-        best = programs.get_best(island_idx=island_idx)
-        if best is not None:
-            return best
-        return programs.get_most_recent(correct_only=True, island_idx=island_idx)
+        with db.session() as session:
+            best = program_reads.get_best(session, island_idx=island_idx)
+            if best is not None:
+                return best
+            return program_reads.get_most_recent(
+                session,
+                correct_only=True,
+                island_idx=island_idx,
+            )
 
     def _select_sequential(
         self,
-        programs: ProgramController,
+        db: Database,
         island_idx: Optional[int],
     ) -> Optional[Program]:
-        program = programs.get_most_recent(correct_only=True, island_idx=island_idx)
-        if program is not None:
-            return program
-        return programs.get_most_recent(island_idx=island_idx)
+        with db.session() as session:
+            program = program_reads.get_most_recent(
+                session,
+                correct_only=True,
+                island_idx=island_idx,
+            )
+            if program is not None:
+                return program
+            return program_reads.get_most_recent(session, island_idx=island_idx)
 
 
 class InspirationSelector:
-    """Controller-backed inspiration selection policy."""
+    """Archive/top-k inspiration selection policy."""
 
     def __init__(
         self,
@@ -284,7 +307,7 @@ class InspirationSelector:
 
     def select_archive(
         self,
-        programs: ProgramController,
+        db: Database,
         parent: Program,
         archive_programs: Sequence[Program],
         *,
@@ -306,7 +329,8 @@ class InspirationSelector:
                 if program.island_idx == parent_island_idx
             ]
 
-        best_program = programs.get_best()
+        with db.session() as session:
+            best_program = program_reads.get_best(session)
         if (
             best_program is not None
             and best_program.correct
@@ -329,9 +353,7 @@ class InspirationSelector:
             selected_ids.add(program.id)
 
         remaining_candidates = [
-            program
-            for program in candidate_archive
-            if program.id not in selected_ids
+            program for program in candidate_archive if program.id not in selected_ids
         ]
         random.shuffle(remaining_candidates)
         for program in remaining_candidates:

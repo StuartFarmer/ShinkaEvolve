@@ -1,5 +1,6 @@
 __all__ = [
     "Program",
+    "Database",
     "DatabaseConfig",
     "AsyncProgramDatabase",
     "InspirationUse",
@@ -24,6 +25,10 @@ def __getattr__(name):
         from .program import Program
 
         return Program
+    if name == "Database":
+        from .connection import Database
+
+        return Database
     if name == "DatabaseConfig":
         from .config import DatabaseConfig
 
@@ -33,19 +38,19 @@ def __getattr__(name):
 
         return AsyncProgramDatabase
     if name == "ProgramCountSnapshot":
-        from shinka.controllers.types import ProgramCountSnapshot
+        from .types import ProgramCountSnapshot
 
         return ProgramCountSnapshot
     if name == "InspirationUse":
-        from shinka.controllers.types import InspirationUse
+        from .types import InspirationUse
 
         return InspirationUse
     if name == "RunMetadataSnapshot":
-        from shinka.controllers.types import RunMetadataSnapshot
+        from .types import RunMetadataSnapshot
 
         return RunMetadataSnapshot
     if name == "Island":
-        from shinka.controllers.types import Island
+        from .types import Island
 
         return Island
     if name in {

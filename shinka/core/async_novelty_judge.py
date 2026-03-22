@@ -8,8 +8,7 @@ import logging
 from typing import List, Optional, Dict, Any, Tuple
 from .novelty_judge import NoveltyJudge
 from ..llm import AsyncLLMClient
-from ..database import Program
-from shinka.controllers import DatabaseController, ProgramController
+from ..database import Database, Program, island_ops
 from ..database.similarity_service import SimilarityService
 
 logger = logging.getLogger(__name__)
@@ -69,12 +68,13 @@ class AsyncNoveltyJudge:
 
             # Check if parent program has island information and islands are initialized
             # This needs to be done in main thread due to SQLite threading restrictions
-            if (
-                parent_program.island_idx is not None
-                and islands is not None
-                and hasattr(islands, "are_all_islands_initialized")
-                and islands.are_all_islands_initialized()
-            ):
+            islands_initialized = False
+            if islands is not None and hasattr(islands, "are_all_islands_initialized"):
+                islands_initialized = bool(islands.are_all_islands_initialized())
+            else:
+                islands_initialized = self.are_all_islands_initialized_thread_safe()
+
+            if parent_program.island_idx is not None and islands_initialized:
                 return True
 
             return False
@@ -212,36 +212,53 @@ class AsyncNoveltyJudge:
     ) -> List[float]:
         if self.db_path is None:
             return []
-        programs = DatabaseController.open(
+        db = Database.open(
             db_path=self.db_path,
             num_islands=self.num_islands,
             read_only=True,
-        ).programs
+        )
         try:
-            return SimilarityService(programs).compute_similarity(
+            return SimilarityService(db).compute_similarity(
                 code_embedding,
                 island_idx,
             )
         finally:
-            programs.close()
+            db.close()
 
     def _get_most_similar_program_thread_safe(
         self, code_embedding: List[float], island_idx: int
     ) -> Optional[Program]:
         if self.db_path is None:
             return None
-        programs = DatabaseController.open(
+        db = Database.open(
             db_path=self.db_path,
             num_islands=self.num_islands,
             read_only=True,
-        ).programs
+        )
         try:
-            return SimilarityService(programs).get_most_similar_program(
+            return SimilarityService(db).get_most_similar_program(
                 code_embedding,
                 island_idx,
             )
         finally:
-            programs.close()
+            db.close()
+
+    def are_all_islands_initialized_thread_safe(self) -> bool:
+        if self.db_path is None:
+            return False
+        db = Database.open(
+            db_path=self.db_path,
+            num_islands=self.num_islands,
+            read_only=True,
+        )
+        try:
+            with db.session() as session:
+                return island_ops.are_all_islands_initialized(
+                    session,
+                    num_islands=self.num_islands,
+                )
+        finally:
+            db.close()
 
     async def _check_llm_novelty_async(
         self, proposed_code: str, most_similar_program: Program

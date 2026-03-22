@@ -2,10 +2,9 @@
 
 import tempfile
 from pathlib import Path
-from shinka.database import Program
+from shinka.database import Database, Program, island_ops, program_writes
 from shinka.database.island_sampler import create_island_sampler
 from shinka.database.archive_policy import create_archive_policy
-from shinka.controllers import DatabaseController
 
 
 def test_island_samplers():
@@ -20,19 +19,18 @@ def test_island_samplers():
         for strategy in strategies:
             print(f"\n=== Testing {strategy} strategy ===")
 
-            controller = DatabaseController.open(
+            db = Database.open(
                 db_path=str(db_path),
                 num_islands=3,
                 read_only=False,
             )
-            repo = controller.programs
             archive_policy = create_archive_policy(
                 archive_selection_strategy="fitness",
                 archive_size=40,
                 archive_criteria={"combined_score": 1.0},
             )
             island_sampler = create_island_sampler(
-                programs=repo,
+                db,
                 strategy=strategy,
             )
 
@@ -46,10 +44,15 @@ def test_island_samplers():
                         combined_score=float(island_idx + 1),  # Different scores
                         island_idx=island_idx,
                     )
-                    repo.add(program)
+                    with db.session_scope() as session:
+                        program_writes.add_program(session, program)
 
             # Test sampling
-            initialized_islands = controller.islands.list_initialized_island_ids()
+            with db.session() as session:
+                initialized_islands = island_ops.list_initialized_island_ids(
+                    session,
+                    num_islands=3,
+                )
             print(f"Initialized islands: {initialized_islands}")
 
             # Sample multiple times to see distribution
@@ -63,7 +66,7 @@ def test_island_samplers():
             # Verify all strategies can sample
             assert len(samples) > 0, f"{strategy} strategy produced no samples"
 
-            controller.close()
+            db.close()
 
             # Clean up for next test
             if db_path.exists():

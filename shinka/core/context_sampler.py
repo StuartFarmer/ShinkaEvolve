@@ -4,14 +4,6 @@ Context sampling for proposal generation.
 This module owns the first step in the proposal pipeline:
 
 `sample context -> build prompt -> ...`
-
-It composes smaller policy/services:
-- `ProgramController` for persisted state
-- `ArchivePolicy` for computed archive membership
-- `ParentSelector` for lineage choice
-- `InspirationSelector` for prompt conditioning
-
-The old `ProgramDatabase.sample*` path is intentionally bypassed here.
 """
 
 from __future__ import annotations
@@ -25,16 +17,15 @@ from typing import List, Optional
 import numpy as np
 
 from shinka.core.search_policies import InspirationSelector, ParentSelector
-from shinka.controllers import DatabaseController, ProgramController
-from shinka.controllers.types import Island
-from shinka.database.program import Program
+from shinka.database import island_ops, program_reads
 from shinka.database.archive_policy import ArchivePolicy, create_archive_policy
+from shinka.database.connection import Database
+from shinka.database.program import Program
+from shinka.database.types import Island
 
 
 @dataclass(frozen=True)
 class SampledContext:
-    """Typed input context for one proposal attempt."""
-
     parent: Program
     archive_inspirations: List[Program] = field(default_factory=list)
     top_k_inspirations: List[Program] = field(default_factory=list)
@@ -48,11 +39,11 @@ class SampledContext:
 
 
 class ContextSampler:
-    """Controller-backed context sampler for one proposal attempt."""
+    """Database-backed context sampler for one proposal attempt."""
 
     def __init__(
         self,
-        programs: ProgramController,
+        db: Database,
         *,
         archive_policy: Optional[ArchivePolicy] = None,
         parent_selector: Optional[ParentSelector] = None,
@@ -68,11 +59,8 @@ class ContextSampler:
         enforce_island_separation: bool = True,
         elite_selection_ratio: float = 0.3,
     ):
-        self.programs = programs
-        self.num_islands = (
-            programs.num_islands if num_islands is None else num_islands
-        )
-
+        self.db = db
+        self.num_islands = db.num_islands if num_islands is None else num_islands
         self.island_selection_strategy = island_selection_strategy
         self.num_archive_inspirations = num_archive_inspirations
         self.num_top_k_inspirations = num_top_k_inspirations
@@ -108,19 +96,23 @@ class ContextSampler:
                 with_fix_mode=with_fix_mode,
             )
 
-        initialized_islands = self.programs.list_initialized_islands()
+        with self.db.session() as session:
+            initialized_islands = island_ops.list_initialized_islands(
+                session,
+                num_islands=self.num_islands,
+            )
         sampled_island = self._sample_island(initialized_islands)
 
         archive_programs = self._compute_archive()
         if with_fix_mode:
             parent, needs_fix = self.parent_selector.select_with_fix_mode(
-                self.programs,
+                self.db,
                 archive_programs,
                 island_idx=sampled_island,
             )
         else:
             parent = self.parent_selector.select(
-                self.programs,
+                self.db,
                 archive_programs,
                 island_idx=sampled_island,
             )
@@ -128,10 +120,12 @@ class ContextSampler:
 
         if needs_fix:
             num_ancestors = self.num_archive_inspirations + self.num_top_k_inspirations
-            ancestor_inspirations = self.programs.get_ancestry(
-                parent.id,
-                max_ancestors=num_ancestors,
-            )
+            with self.db.session() as session:
+                ancestor_inspirations = program_reads.get_ancestry(
+                    session,
+                    parent.id,
+                    max_ancestors=num_ancestors,
+                )
             return SampledContext(
                 parent=parent,
                 archive_inspirations=ancestor_inspirations,
@@ -145,19 +139,17 @@ class ContextSampler:
                 max_resample_attempts=max_resample_attempts,
             )
 
-        num_archive = self.num_archive_inspirations
-        num_topk = self.num_top_k_inspirations
         archive_inspirations = self.inspiration_selector.select_archive(
-            self.programs,
+            self.db,
             parent,
             archive_programs,
-            n=num_archive,
+            n=self.num_archive_inspirations,
         )
         top_k_inspirations = self.inspiration_selector.select_top_k(
             parent,
             archive_programs,
             excluded_programs=archive_inspirations,
-            k=num_topk,
+            k=self.num_top_k_inspirations,
         )
 
         return SampledContext(
@@ -174,10 +166,15 @@ class ContextSampler:
         )
 
     def _compute_archive(self) -> List[Program]:
-        return self.archive_policy.compute(self.programs.list_correct())
+        with self.db.session() as session:
+            return self.archive_policy.compute(program_reads.list_correct(session))
 
     def _are_all_islands_initialized(self) -> bool:
-        initialized = self.programs.list_initialized_island_ids()
+        with self.db.session() as session:
+            initialized = island_ops.list_initialized_island_ids(
+                session,
+                num_islands=int(self.num_islands),
+            )
         if not initialized:
             return False
         num_islands = int(self.num_islands)
@@ -195,20 +192,24 @@ class ContextSampler:
         max_resample_attempts: Optional[int],
         with_fix_mode: bool,
     ) -> SampledContext:
-        correct_programs = self.programs.list_correct()
+        with self.db.session() as session:
+            correct_programs = program_reads.list_correct(session)
 
         if correct_programs:
-            parent = self.programs.get_earliest()
+            with self.db.session() as session:
+                parent = program_reads.get_earliest(session)
             if parent is None:
-                raise RuntimeError("No programs found in program controller")
+                raise RuntimeError("No programs found in database")
             needs_fix = with_fix_mode and not parent.correct
             archive_inspirations: List[Program] = []
             if needs_fix:
                 num_ancestors = self.num_archive_inspirations + self.num_top_k_inspirations
-                archive_inspirations = self.programs.get_ancestry(
-                    parent.id,
-                    max_ancestors=num_ancestors,
-                )
+                with self.db.session() as session:
+                    archive_inspirations = program_reads.get_ancestry(
+                        session,
+                        parent.id,
+                        max_ancestors=num_ancestors,
+                    )
             return SampledContext(
                 parent=parent,
                 archive_inspirations=archive_inspirations,
@@ -222,15 +223,20 @@ class ContextSampler:
                 max_resample_attempts=max_resample_attempts,
             )
 
-        incorrect_programs = self.programs.list_incorrect()
+        with self.db.session() as session:
+            incorrect_programs = program_reads.list_incorrect(session)
         if incorrect_programs:
             parent = random.choice(incorrect_programs)
-            num_ancestors = self.num_archive_inspirations + self.num_top_k_inspirations
-            archive_inspirations = (
-                self.programs.get_ancestry(parent.id, max_ancestors=num_ancestors)
-                if with_fix_mode
-                else []
-            )
+            if with_fix_mode:
+                num_ancestors = self.num_archive_inspirations + self.num_top_k_inspirations
+                with self.db.session() as session:
+                    archive_inspirations = program_reads.get_ancestry(
+                        session,
+                        parent.id,
+                        max_ancestors=num_ancestors,
+                    )
+            else:
+                archive_inspirations = []
             return SampledContext(
                 parent=parent,
                 archive_inspirations=archive_inspirations,
@@ -244,9 +250,10 @@ class ContextSampler:
                 max_resample_attempts=max_resample_attempts,
             )
 
-        parent = self.programs.get_earliest()
+        with self.db.session() as session:
+            parent = program_reads.get_earliest(session)
         if parent is None:
-            raise RuntimeError("No programs found in program controller")
+            raise RuntimeError("No programs found in database")
         return SampledContext(
             parent=parent,
             archive_inspirations=[],
@@ -278,19 +285,14 @@ class ContextSampler:
             return random.choice(candidates)
 
         if strategy == "proportional":
-            values = np.array(
-                [island.best_score for island in initialized_islands],
-                dtype=float,
-            )
+            values = np.array([island.best_score for island in initialized_islands], dtype=float)
             exp_values = np.exp(values)
             probs = (
                 exp_values / np.sum(exp_values)
                 if float(np.sum(exp_values)) > 0
                 else np.ones(len(values)) / len(values)
             )
-            return initialized_islands[
-                int(np.random.choice(len(initialized_islands), p=probs))
-            ].island_idx
+            return initialized_islands[int(np.random.choice(len(initialized_islands), p=probs))].island_idx
 
         if strategy == "weighted":
             weights = []
@@ -304,9 +306,7 @@ class ContextSampler:
                 if float(np.sum(weights_arr)) > 0
                 else np.ones(len(weights_arr)) / len(weights_arr)
             )
-            return initialized_islands[
-                int(np.random.choice(len(initialized_islands), p=probs))
-            ].island_idx
+            return initialized_islands[int(np.random.choice(len(initialized_islands), p=probs))].island_idx
 
         raise ValueError(f"Unknown island selection strategy: {strategy}")
 
@@ -315,7 +315,7 @@ class AsyncContextSampler:
     """
     Async sibling for the async runner.
 
-    Each call opens a fresh read-only controller, which keeps sampling isolated
+    Each call opens a fresh read-only database, which keeps sampling isolated
     from concurrent writer state and avoids shared-cursor coupling.
     """
 
@@ -358,14 +358,14 @@ class AsyncContextSampler:
         with_fix_mode: bool = True,
     ) -> SampledContext:
         async with self._lock:
-            programs = DatabaseController.open(
+            db = Database.open(
                 db_path=self.db_path,
                 num_islands=self.num_islands,
                 read_only=True,
-            ).programs
+            )
             try:
                 sampler = ContextSampler(
-                    programs,
+                    db,
                     num_islands=self.num_islands,
                     island_selection_strategy=self.island_selection_strategy,
                     num_archive_inspirations=self.num_archive_inspirations,
@@ -386,4 +386,4 @@ class AsyncContextSampler:
                     with_fix_mode=with_fix_mode,
                 )
             finally:
-                programs.close()
+                db.close()

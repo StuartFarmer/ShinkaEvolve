@@ -21,8 +21,7 @@ from rich.console import Console
 from rich.table import Table
 import rich.box
 
-from shinka.controllers import DatabaseController, ProgramController
-from shinka.database import Program
+from shinka.database import Database, Program, island_ops, program_reads, program_writes, run_state_ops
 from shinka.database.archive_policy import create_archive_policy
 from shinka.database.async_dbase import AsyncProgramDatabase
 from shinka.database.display import DatabaseDisplay
@@ -364,10 +363,7 @@ class ShinkaEvolveRunner:
 
         # Database-backed services are initialized in _setup_async() once the
         # results directory is finalized.
-        self.database_controller: Optional[DatabaseController] = None
-        self.programs: Optional[ProgramController] = None
-        self.metadata_repo = None
-        self.island_repo = None
+        self.database: Optional[Database] = None
         self.archive_policy = None
         self.database_display: Optional[DatabaseDisplay] = None
         self.sync_embedding_client: Optional[EmbeddingClient] = None
@@ -560,12 +556,12 @@ class ShinkaEvolveRunner:
                 results_dir,
             )
 
-    def _open_programs(self, *, read_only: bool) -> ProgramController:
-        return DatabaseController.open(
+    def _open_database(self, *, read_only: bool) -> Database:
+        return Database.open(
             db_path=self.db_path,
             num_islands=self.num_islands,
             read_only=read_only,
-        ).programs
+        )
 
     def _ensure_sync_embedding_client(self) -> Optional[EmbeddingClient]:
         if not self.evo_config.embedding_model:
@@ -590,8 +586,6 @@ class ShinkaEvolveRunner:
 
     def _update_runtime_last_iteration(self, value: int) -> None:
         self.runtime_last_iteration = max(self.runtime_last_iteration, int(value))
-        if self.programs is not None:
-            self.programs.last_iteration = self.runtime_last_iteration
         if self.database_display is not None:
             self.database_display.set_last_iteration(self.runtime_last_iteration)
 
@@ -601,17 +595,22 @@ class ShinkaEvolveRunner:
     def _set_initial_program_count_adjustment(self, adjustment: int) -> None:
         adjustment = max(int(adjustment), 0)
         self.initial_program_count_adjustment = adjustment
-        if self.metadata_repo is not None:
-            self.metadata_repo.set(
-                "initial_program_count_adjustment",
-                str(self.initial_program_count_adjustment),
-            )
+        if self.database is not None:
+            with self.database.session_scope() as session:
+                run_state_ops.set(
+                    session,
+                    "initial_program_count_adjustment",
+                    str(self.initial_program_count_adjustment),
+                )
 
     def _all_islands_initialized(self) -> bool:
-        return bool(
-            self.island_repo is not None
-            and self.island_repo.are_all_islands_initialized()
-        )
+        if self.database is None:
+            return False
+        with self.database.session() as session:
+            return island_ops.are_all_islands_initialized(
+                session,
+                num_islands=self.num_islands,
+            )
 
     def _print_database_summary(self) -> None:
         if self.database_display is None:
@@ -621,16 +620,13 @@ class ShinkaEvolveRunner:
         self.database_display.print_summary(console=self.console)
 
     def _build_runtime_services(self) -> None:
-        self.database_controller = DatabaseController.open(
+        self.database = Database.open(
             db_path=self.db_path,
             num_islands=self.num_islands,
             read_only=False,
         )
-        self.programs = self.database_controller.programs
-        self.metadata_repo = self.database_controller.run_state
-        self.island_repo = self.database_controller.islands
-
-        snapshot = self.metadata_repo.load_snapshot()
+        with self.database.session() as session:
+            snapshot = run_state_ops.load_snapshot(session, read_only=False)
         self.runtime_last_iteration = snapshot.last_iteration
         self.runtime_best_program_id = snapshot.best_program_id
         self.runtime_beam_search_parent_id = snapshot.beam_search_parent_id
@@ -644,10 +640,9 @@ class ShinkaEvolveRunner:
             archive_criteria=self.archive_criteria,
         )
         self.database_display = DatabaseDisplay(
-            programs=self.programs,
+            db=self.database,
             archive_size=self.archive_size,
             num_islands=self.num_islands,
-            islands=self.island_repo,
             archive_policy=self.archive_policy,
             migration_interval=self.migration_interval,
             migration_rate=self.migration_rate,
@@ -763,11 +758,13 @@ class ShinkaEvolveRunner:
 
         def _compute_costs_thread_safe():
             """Thread-safe computation of total costs from persisted programs."""
-            repo = None
+            db = None
             try:
-                repo = self._open_programs(read_only=True)
+                db = self._open_database(read_only=True)
+                with db.session() as session:
+                    programs = program_reads.list_all(session)
                 total_costs = 0.0
-                for program in repo.list_all():
+                for program in programs:
                     metadata = program.metadata or {}
                     total_costs += float(metadata.get("api_costs", 0.0) or 0.0)
                     total_costs += float(metadata.get("embed_cost", 0.0) or 0.0)
@@ -776,8 +773,8 @@ class ShinkaEvolveRunner:
 
                 return total_costs
             finally:
-                if repo:
-                    repo.close()
+                if db:
+                    db.close()
 
         # Call thread-safe method through executor
         loop = asyncio.get_event_loop()
@@ -1100,12 +1097,13 @@ class ShinkaEvolveRunner:
                     )
                 await self._generate_initial_program()
 
-    def _list_all_programs_via_controller(self) -> list[Program]:
-        programs = self._open_programs(read_only=True)
+    def _list_all_programs_via_db(self) -> list[Program]:
+        db = self._open_database(read_only=True)
         try:
-            return programs.list_all()
+            with db.session() as session:
+                return program_reads.list_all(session)
         finally:
-            programs.close()
+            db.close()
 
     async def _setup_prompt_evolution(self):
         """Setup prompt evolution database and components."""
@@ -1254,7 +1252,7 @@ class ShinkaEvolveRunner:
                 try:
                     # Get all correct program scores from main database
                     # This matches what the webUI uses for beat percentage calculation
-                    all_programs = self._list_all_programs_via_controller()
+                    all_programs = self._list_all_programs_via_db()
                     all_correct_scores = [
                         p.combined_score
                         for p in all_programs
@@ -1409,14 +1407,16 @@ class ShinkaEvolveRunner:
         """Persist metadata updates for a stored initial program."""
 
         def update_metadata():
-            repo = self._open_programs(read_only=False)
+            db = self._open_database(read_only=False)
             try:
-                repo.update_program_metadata(
-                    initial_program.id,
-                    initial_program.metadata or {},
-                )
+                with db.session_scope() as session:
+                    program_writes.update_program_metadata(
+                        session,
+                        initial_program.id,
+                        initial_program.metadata or {},
+                    )
             finally:
-                repo.close()
+                db.close()
 
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, update_metadata)
@@ -2649,7 +2649,7 @@ class ShinkaEvolveRunner:
                     code_embedding,
                     generation,
                     parent_program,
-                    self.island_repo,
+                    self.database,
                 )
 
                 if should_check:
@@ -2682,11 +2682,11 @@ class ShinkaEvolveRunner:
                     # If not accepted, continue to next attempt (rejection sampling)
                 else:
                     proposal_accepted = True
-                    if self.island_repo is None:
+                    if self.database is None:
                         self.novelty_judge.log_novelty_skip_message(
-                            "no island controller"
+                            "no database"
                         )
-                    elif not self.island_repo.are_all_islands_initialized():
+                    elif not self._all_islands_initialized():
                         self.novelty_judge.log_novelty_skip_message(
                             "not all islands initialized yet"
                         )
@@ -3618,14 +3618,16 @@ class ShinkaEvolveRunner:
 
                                 # Update the program in the database
                                 def update_metadata():
-                                    repo = self._open_programs(read_only=False)
+                                    db = self._open_database(read_only=False)
                                     try:
-                                        repo.update_program_metadata(
-                                            program.id,
-                                            program.metadata,
-                                        )
+                                        with db.session_scope() as session:
+                                            program_writes.update_program_metadata(
+                                                session,
+                                                program.id,
+                                                program.metadata,
+                                            )
                                     finally:
-                                        repo.close()
+                                        db.close()
 
                                 loop = asyncio.get_event_loop()
                                 await loop.run_in_executor(None, update_metadata)
@@ -4079,10 +4081,10 @@ class ShinkaEvolveRunner:
                 )
 
             # Final recomputation of prompt percentiles to ensure fitness is accurate
-            if self.prompt_db is not None and self.programs is not None:
+            if self.prompt_db is not None and self.database is not None:
                 try:
                     # Get all correct program scores from main database
-                    all_programs = self._list_all_programs_via_controller()
+                    all_programs = self._list_all_programs_via_db()
                     all_correct_scores = [
                         p.combined_score
                         for p in all_programs
@@ -4106,9 +4108,9 @@ class ShinkaEvolveRunner:
 
             # Cleanup database
             await self.async_db.close_async()
-            if self.database_controller is not None:
-                self.database_controller.close()
-                self.database_controller = None
+            if self.database is not None:
+                self.database.close()
+                self.database = None
 
             # Cleanup scheduler
             self.scheduler.shutdown()

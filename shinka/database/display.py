@@ -9,6 +9,9 @@ from rich.columns import Columns as RichColumns  # type: ignore
 from rich.console import Console as RichConsole  # type: ignore
 from rich.table import Table as RichTable  # type: ignore
 
+from . import island_ops, program_reads
+from .connection import Database
+
 logger = logging.getLogger(__name__)
 
 
@@ -18,20 +21,18 @@ class DatabaseDisplay:
     def __init__(
         self,
         *,
-        programs,
+        db: Database,
         archive_size: int,
         num_islands: int,
-        islands,
         archive_policy,
         migration_interval: int = 0,
         migration_rate: float = 0.0,
         island_elitism: bool = False,
         default_console: Optional[RichConsole] = None,
     ):
-        self.programs = programs
+        self.db = db
         self.archive_size = archive_size
         self.num_islands = num_islands
-        self.islands = islands
         self.archive_policy = archive_policy
         self.migration_interval = migration_interval
         self.migration_rate = migration_rate
@@ -49,10 +50,28 @@ class DatabaseDisplay:
         return console or self.default_console or RichConsole()
 
     def _all_programs(self):
-        return self.programs.list_all()
+        with self.db.session() as session:
+            return program_reads.list_all(session)
 
     def _best_program(self):
-        return self.programs.get_best()
+        with self.db.session() as session:
+            return program_reads.get_best(session)
+
+    def _top_programs(self, *, n: int, metric: Optional[str], correct_only: bool):
+        with self.db.session() as session:
+            return program_reads.list_top(
+                session,
+                n=n,
+                metric=metric,
+                correct_only=correct_only,
+            )
+
+    def _format_populations(self) -> str:
+        with self.db.session() as session:
+            return island_ops.format_populations(
+                session,
+                num_islands=self.num_islands,
+            )
 
     def _cost_totals(self):
         total_api_cost = 0.0
@@ -233,7 +252,7 @@ class DatabaseDisplay:
             f"[bold]{len(archive_programs)}[/bold] / {self.archive_size} ({archive_percentage:.0f}%)",
         )
         if self.num_islands > 0:
-            summary_table.add_row("Island Populations", self.islands.format_populations())
+            summary_table.add_row("Island Populations", self._format_populations())
             migration_info = None
             if self.migration_interval > 0:
                 migration_info = (
@@ -303,7 +322,7 @@ class DatabaseDisplay:
         tables_to_display.append(cost_table)
         _console.print(RichColumns(tables_to_display))
 
-        top_programs = self.programs.list_top(
+        top_programs = self._top_programs(
             n=10,
             metric="combined_score",
             correct_only=True,

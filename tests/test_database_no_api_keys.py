@@ -2,8 +2,7 @@ import asyncio
 import tempfile
 from pathlib import Path
 
-from shinka.controllers import DatabaseController
-from shinka.database import Program
+from shinka.database import Database, Program, program_reads, program_writes
 from shinka.database.async_dbase import AsyncProgramDatabase
 
 
@@ -19,25 +18,27 @@ def _program(program_id: str) -> Program:
 
 
 def test_program_database_init_without_openai_key(monkeypatch):
-    """Controller-backed storage construction should not require API credentials."""
+    """Database runtime construction should not require API credentials."""
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "no_key_init.db"
-        db = DatabaseController.open(
+        db = Database.open(
             db_path=str(db_path),
             num_islands=1,
             read_only=False,
-        ).programs
+        )
         try:
-            db.add(_program("p0"))
-            repo = DatabaseController.open(
+            with db.session_scope() as session:
+                program_writes.add_program(session, _program("p0"))
+            read_db = Database.open(
                 db_path=str(db_path),
                 num_islands=1,
                 read_only=True,
-            ).programs
-            assert repo.get("p0") is not None
-            repo.close()
+            )
+            with read_db.session() as session:
+                assert program_reads.get(session, "p0") is not None
+            read_db.close()
         finally:
             db.close()
 
@@ -61,13 +62,14 @@ def test_async_db_add_without_openai_key_when_embeddings_disabled(monkeypatch):
             )
             try:
                 await async_db.add_program_async(_program("async-p0"))
-                repo = DatabaseController.open(
+                read_db = Database.open(
                     db_path=str(db_path),
                     num_islands=1,
                     read_only=True,
-                ).programs
-                assert repo.get("async-p0") is not None
-                repo.close()
+                )
+                with read_db.session() as session:
+                    assert program_reads.get(session, "async-p0") is not None
+                read_db.close()
             finally:
                 await async_db.close_async()
 

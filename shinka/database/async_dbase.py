@@ -11,11 +11,11 @@ import traceback
 from typing import Callable, List, Optional, Tuple, Dict, Any
 from concurrent.futures import ThreadPoolExecutor
 
-from .complexity import analyze_code_metrics
+from .connection import Database
+from . import embedding_ops, island_ops, program_reads, run_state_ops
 from .program import Program
 from .archive_policy import create_archive_policy
 from .program_write_service import ProgramWriteService
-from shinka.controllers import DatabaseController, EmbeddingController, ProgramController
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +77,7 @@ db_debugger = AsyncDBDebugger()
 
 
 class AsyncProgramDatabase:
-    """Async wrapper around controller-backed runtime services."""
+    """Async wrapper around session-based runtime services."""
 
     def __init__(
         self,
@@ -188,12 +188,12 @@ class AsyncProgramDatabase:
         if self.enable_deadlock_debugging and op_id is not None:
             db_debugger.track_end(op_id, success=success)
 
-    def _open_programs(self, *, read_only: bool) -> ProgramController:
-        return DatabaseController.open(
+    def _open_database(self, *, read_only: bool) -> Database:
+        return Database.open(
             db_path=self.db_path,
             num_islands=self.num_islands,
             read_only=read_only,
-        ).programs
+        )
 
     async def _deadlock_monitor(self):
         """Background task to monitor for deadlocks."""
@@ -242,13 +242,13 @@ class AsyncProgramDatabase:
 
                 def sample_thread_safe():
                     thread_op_id = self._debug_track_start("sample_thread_safe")
-                    repo = None
+                    db = None
                     try:
                         from shinka.core.context_sampler import ContextSampler
 
-                        repo = self._open_programs(read_only=True)
+                        db = self._open_database(read_only=True)
                         sampler = ContextSampler(
-                            repo,
+                            db,
                             num_islands=self.num_islands,
                             island_selection_strategy=self.island_selection_strategy,
                             num_archive_inspirations=self.num_archive_inspirations,
@@ -280,9 +280,9 @@ class AsyncProgramDatabase:
                         logger.error(f"Error in sample_thread_safe: {e}")
                         raise
                     finally:
-                        if repo:
+                        if db:
                             try:
-                                repo.close()
+                                db.close()
                             except Exception as e:
                                 logger.warning(f"Error closing thread database: {e}")
 
@@ -323,13 +323,13 @@ class AsyncProgramDatabase:
                     thread_op_id = self._debug_track_start(
                         "sample_with_fix_thread_safe"
                     )
-                    repo = None
+                    db = None
                     try:
                         from shinka.core.context_sampler import ContextSampler
 
-                        repo = self._open_programs(read_only=True)
+                        db = self._open_database(read_only=True)
                         sampler = ContextSampler(
-                            repo,
+                            db,
                             num_islands=self.num_islands,
                             island_selection_strategy=self.island_selection_strategy,
                             num_archive_inspirations=self.num_archive_inspirations,
@@ -362,9 +362,9 @@ class AsyncProgramDatabase:
                         logger.error(f"Error in sample_with_fix_thread_safe: {e}")
                         raise
                     finally:
-                        if repo:
+                        if db:
                             try:
-                                repo.close()
+                                db.close()
                             except Exception as e:
                                 logger.warning(f"Error closing thread database: {e}")
 
@@ -393,15 +393,20 @@ class AsyncProgramDatabase:
                 await asyncio.sleep(0)
 
                 def update_thread_safe():
-                    repo = None
+                    db = None
                     try:
-                        repo = self._open_programs(read_only=False)
-                        repo.set_metadata("beam_search_parent_id", parent_id)
+                        db = self._open_database(read_only=False)
+                        with db.session_scope() as session:
+                            run_state_ops.set(
+                                session,
+                                "beam_search_parent_id",
+                                parent_id,
+                            )
                         self.update_beam_search_parent(parent_id)
                     finally:
-                        if repo:
+                        if db:
                             try:
-                                repo.close()
+                                db.close()
                             except Exception:
                                 pass
 
@@ -447,43 +452,25 @@ class AsyncProgramDatabase:
             # Prepare program data outside the lock to reduce lock time
             await asyncio.sleep(0)  # Yield control to event loop
 
-            # Asynchronously calculate complexity if not provided
-            if program.complexity == 0.0:
-                try:
-                    loop = asyncio.get_event_loop()
-                    # Get language from program, default to python
-                    language = getattr(program, "language", "python")
-                    code_metrics = await loop.run_in_executor(
-                        self.executor,
-                        analyze_code_metrics,
-                        program.code,
-                        language,
-                    )
-                    program.complexity = code_metrics.get("complexity_score", 0.0)
-                    if program.metadata is None:
-                        program.metadata = {}
-                    program.metadata["code_analysis_metrics"] = code_metrics
-                except Exception as e:
-                    logger.warning(
-                        f"Could not calculate complexity for program {program.id}: {e}"
-                    )
-                    # Fallback to length
-                    program.complexity = float(len(program.code))
-
             # Set additional metadata using setattr for dynamic attributes
             if parent_id:
-                setattr(program, "parent_id", parent_id)
+                program.parent_id = parent_id
             if archive_insp_ids:
-                setattr(program, "archive_inspiration_ids", archive_insp_ids)
+                program.archive_inspiration_ids = archive_insp_ids
             if top_k_insp_ids:
-                setattr(program, "top_k_inspiration_ids", top_k_insp_ids)
+                program.top_k_inspiration_ids = top_k_insp_ids
             if code_diff:
-                setattr(program, "code_diff", code_diff)
+                program.code_diff = code_diff
             if meta_patch_data:
-                setattr(program, "meta_patch_data", meta_patch_data)
+                if program.metadata is None:
+                    program.metadata = {}
+                program.metadata.update(meta_patch_data)
             if code_embedding:
-                setattr(program, "code_embedding", code_embedding)
-            setattr(program, "embed_cost", embed_cost)
+                program.embedding = code_embedding
+            if embed_cost:
+                if program.metadata is None:
+                    program.metadata = {}
+                program.metadata["embed_cost"] = embed_cost
 
             # Use semaphore to prevent concurrent database operations that can deadlock
             async with self._db_semaphore:
@@ -555,20 +542,24 @@ class AsyncProgramDatabase:
                     embed_cost,
                 ) = program_data
 
-                # Set additional metadata using setattr for dynamic attributes
                 if parent_id:
-                    setattr(program, "parent_id", parent_id)
+                    program.parent_id = parent_id
                 if archive_insp_ids:
-                    setattr(program, "archive_inspiration_ids", archive_insp_ids)
+                    program.archive_inspiration_ids = archive_insp_ids
                 if top_k_insp_ids:
-                    setattr(program, "top_k_inspiration_ids", top_k_insp_ids)
+                    program.top_k_inspiration_ids = top_k_insp_ids
                 if code_diff:
-                    setattr(program, "code_diff", code_diff)
+                    program.code_diff = code_diff
                 if meta_patch_data:
-                    setattr(program, "meta_patch_data", meta_patch_data)
+                    if program.metadata is None:
+                        program.metadata = {}
+                    program.metadata.update(meta_patch_data)
                 if code_embedding:
-                    setattr(program, "code_embedding", code_embedding)
-                setattr(program, "embed_cost", embed_cost)
+                    program.embedding = code_embedding
+                if embed_cost:
+                    if program.metadata is None:
+                        program.metadata = {}
+                    program.metadata["embed_cost"] = embed_cost
 
                 prepared_programs.append(program)
 
@@ -601,7 +592,7 @@ class AsyncProgramDatabase:
 
     def _build_thread_write_service(
         self,
-        controller: DatabaseController,
+        db: Database,
     ) -> ProgramWriteService:
         archive_policy = create_archive_policy(
             archive_selection_strategy=self.archive_selection_strategy,
@@ -609,92 +600,85 @@ class AsyncProgramDatabase:
             archive_criteria=self.archive_criteria,
         )
 
-        def update_best_metadata(program: Program) -> None:
+        def update_best_metadata(session, program: Program) -> None:
             if not program.correct:
                 return
-            current_best = controller.programs.get_best()
+            current_best = program_reads.get_best(session)
             if current_best is None or current_best.id != program.id:
                 return
             score = program.combined_score or 0.0
-            best_score_ever_raw = controller.programs.get_metadata("best_score_ever")
+            snapshot = run_state_ops.load_snapshot(session, read_only=False)
             best_score_ever = (
-                float(best_score_ever_raw)
-                if best_score_ever_raw not in (None, "")
+                float(snapshot.best_score_ever)
+                if snapshot.best_score_ever is not None
                 else None
             )
             if best_score_ever is None or score > best_score_ever:
-                controller.programs.set_metadata("best_score_generation", str(program.generation))
-                controller.programs.set_metadata("best_score_ever", str(score))
+                run_state_ops.set(
+                    session,
+                    "best_score_generation",
+                    str(program.generation),
+                )
+                run_state_ops.set(session, "best_score_ever", str(score))
 
-        def maybe_spawn_island(current_generation: int) -> bool:
+        def maybe_spawn_island(session, current_generation: int) -> bool:
             if not self.enable_dynamic_islands:
                 return False
             threshold = self.stagnation_threshold
-            best_gen_raw = controller.programs.get_metadata("best_score_generation", "0")
-            best_generation = int(best_gen_raw or 0)
+            snapshot = run_state_ops.load_snapshot(session, read_only=False)
+            best_generation = int(snapshot.best_score_generation or 0)
             if current_generation - best_generation < threshold:
                 return False
-            spawned = controller.islands.spawn_island(
-                controller.programs,
+            spawned = island_ops.spawn_island(
+                session,
                 archive_policy,
+                num_islands=self.num_islands,
                 strategy=self.island_spawn_strategy,
                 subtree_size=self.island_spawn_subtree_size,
             )
             if spawned:
-                controller.programs.set_metadata(
+                run_state_ops.set(
+                    session,
                     "best_score_generation",
                     str(current_generation),
                 )
             return spawned
 
         return ProgramWriteService(
-            programs=controller.programs,
-            islands=controller.islands,
+            db=db,
             num_islands=self.num_islands,
             migration_interval=self.migration_interval,
             migration_rate=self.migration_rate,
             island_elitism=self.island_elitism,
             update_best_program=update_best_metadata,
-            update_metadata=controller.programs.set_metadata,
             recompute_embeddings=None,
             print_program_summary=None,
             maybe_spawn_island=maybe_spawn_island,
-        )
-
-    def _build_thread_embedding_controller(
-        self,
-        controller: DatabaseController,
-    ) -> EmbeddingController:
-        return EmbeddingController(
-            controller.connection,
-            embedding_client_factory=self.ensure_embedding_client,
         )
 
     async def _add_program_fast_async(self, program: Program):
         """Async fast program addition that defers expensive operations."""
 
         def add_program_sync():
-            controller = None
+            db = None
             try:
-                controller = DatabaseController.open(
-                    db_path=self.db_path,
-                    num_islands=self.num_islands,
-                    read_only=False,
-                )
-                write_service = self._build_thread_write_service(controller)
+                db = self._open_database(read_only=False)
+                with db.session() as session:
+                    snapshot = run_state_ops.load_snapshot(session, read_only=False)
+                write_service = self._build_thread_write_service(db)
                 result = write_service.add(
                     program,
                     verbose=False,
-                    current_last_iteration=controller.programs.last_iteration,
+                    current_last_iteration=snapshot.last_iteration,
                 )
                 self.update_last_iteration(result.last_iteration)
             except Exception as e:
                 logger.error(f"Error in add_program_sync: {e}")
                 raise
             finally:
-                if controller:
+                if db:
                     try:
-                        controller.close()
+                        db.close()
                     except Exception as e:
                         logger.warning(
                             f"Error closing thread database in add_program_sync: {e}"
@@ -742,19 +726,19 @@ class AsyncProgramDatabase:
             logger.error(f"Error in background embedding recomputation: {e}")
 
     def _recompute_embeddings_thread_safe(self) -> None:
-        controller = None
+        db = None
         try:
-            controller = DatabaseController.open(
-                db_path=self.db_path,
-                num_islands=self.num_islands,
-                read_only=False,
-            )
-            embedding_controller = self._build_thread_embedding_controller(controller)
-            embedding_controller.recompute()
+            db = self._open_database(read_only=False)
+            with db.session_scope() as session:
+                embedding_ops.recompute(
+                    session,
+                    embedding_client_factory=self.ensure_embedding_client,
+                    read_only=db.read_only,
+                )
         finally:
-            if controller:
+            if db:
                 try:
-                    controller.close()
+                    db.close()
                 except Exception as e:
                     logger.warning(
                         f"Error closing thread database in embedding recompute: {e}"
@@ -770,18 +754,19 @@ class AsyncProgramDatabase:
 
             def get_thread_safe():
                 thread_op_id = self._debug_track_start("get_thread_safe")
-                thread_db = None
+                db = None
                 try:
-                    thread_db = self._open_programs(read_only=True)
-                    try:
-                        result = thread_db.get(program_id)
-                        self._debug_track_end(thread_op_id, success=True)
-                        return result
-                    finally:
-                        thread_db.close()
+                    db = self._open_database(read_only=True)
+                    with db.session() as session:
+                        result = program_reads.get(session, program_id)
+                    self._debug_track_end(thread_op_id, success=True)
+                    return result
                 except Exception as e:
                     self._debug_track_end(thread_op_id, success=False)
                     raise
+                finally:
+                    if db:
+                        db.close()
 
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(self.executor, get_thread_safe)
@@ -802,18 +787,19 @@ class AsyncProgramDatabase:
 
             def get_best_thread_safe():
                 thread_op_id = self._debug_track_start("get_best_thread_safe")
-                thread_db = None
+                db = None
                 try:
-                    thread_db = self._open_programs(read_only=True)
-                    try:
-                        result = thread_db.get_best()
-                        self._debug_track_end(thread_op_id, success=True)
-                        return result
-                    finally:
-                        thread_db.close()
+                    db = self._open_database(read_only=True)
+                    with db.session() as session:
+                        result = program_reads.get_best(session)
+                    self._debug_track_end(thread_op_id, success=True)
+                    return result
                 except Exception as e:
                     self._debug_track_end(thread_op_id, success=False)
                     raise
+                finally:
+                    if db:
+                        db.close()
 
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(self.executor, get_best_thread_safe)
@@ -936,11 +922,12 @@ class AsyncProgramDatabase:
         try:
             loop = asyncio.get_event_loop()
             def get_by_generation_thread_safe():
-                repo = self._open_programs(read_only=True)
+                db = self._open_database(read_only=True)
                 try:
-                    return repo.list_by_generation(generation)
+                    with db.session() as session:
+                        return program_reads.list_by_generation(session, generation)
                 finally:
-                    repo.close()
+                    db.close()
 
             result = await loop.run_in_executor(
                 self.executor,
@@ -962,14 +949,15 @@ class AsyncProgramDatabase:
 
             def count_programs_thread_safe():
                 """Thread-safe program counting."""
-                thread_db = None
+                db = None
                 try:
-                    thread_db = self._open_programs(read_only=True)
-                    return thread_db.get_count_snapshot().count
+                    db = self._open_database(read_only=True)
+                    with db.session() as session:
+                        return program_reads.get_count_snapshot(session).count
                 finally:
-                    if thread_db:
+                    if db:
                         try:
-                            thread_db.close()
+                            db.close()
                         except Exception as close_e:
                             logger.warning(f"Error closing thread database: {close_e}")
 
@@ -995,11 +983,16 @@ class AsyncProgramDatabase:
         try:
             loop = asyncio.get_event_loop()
             def get_top_programs_thread_safe():
-                repo = self._open_programs(read_only=True)
+                db = self._open_database(read_only=True)
                 try:
-                    return repo.list_top(n=n, correct_only=correct_only)
+                    with db.session() as session:
+                        return program_reads.list_top(
+                            session,
+                            n=n,
+                            correct_only=correct_only,
+                        )
                 finally:
-                    repo.close()
+                    db.close()
 
             result = await loop.run_in_executor(
                 self.executor,
@@ -1036,10 +1029,15 @@ class AsyncProgramDatabase:
 
             def compute_percentile_thread_safe():
                 """Thread-safe percentile computation."""
-                repo = None
+                db = None
                 try:
-                    repo = self._open_programs(read_only=True)
-                    programs = repo.list_correct() if correct_only else repo.list_all()
+                    db = self._open_database(read_only=True)
+                    with db.session() as session:
+                        programs = (
+                            program_reads.list_correct(session)
+                            if correct_only
+                            else program_reads.list_all(session)
+                        )
                     all_scores = [
                         p.combined_score
                         for p in programs
@@ -1057,9 +1055,9 @@ class AsyncProgramDatabase:
                     return percentile
 
                 finally:
-                    if repo:
+                    if db:
                         try:
-                            repo.close()
+                            db.close()
                         except Exception as close_e:
                             logger.warning(f"Error closing thread database: {close_e}")
 

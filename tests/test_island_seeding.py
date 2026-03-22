@@ -5,18 +5,17 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from shinka.core.async_runner import ShinkaEvolveRunner
-from shinka.controllers import DatabaseController
-from shinka.database import Program
+from shinka.database import Database, Program, program_reads, program_writes
 
 
 def test_explicit_island_assignment_is_preserved():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "explicit_island.db"
-        db = DatabaseController.open(
+        db = Database.open(
             db_path=str(db_path),
             num_islands=3,
             read_only=False,
-        ).programs
+        )
 
         seeded_program = Program(
             id="seed_program",
@@ -29,20 +28,21 @@ def test_explicit_island_assignment_is_preserved():
         )
 
         try:
-            db.add(seeded_program)
-            repo = DatabaseController.open(
+            with db.session_scope() as session:
+                program_writes.add_program(session, seeded_program)
+            read_db = Database.open(
                 db_path=str(db_path),
                 num_islands=3,
                 read_only=True,
-            ).programs
-            stored_program = repo.get("seed_program")
-            assert stored_program is not None
-            assert stored_program.island_idx == 2
-            assert repo.list_by_generation(0) == [stored_program]
+            )
+            with read_db.session() as session:
+                stored_program = program_reads.get(session, "seed_program")
+                assert stored_program is not None
+                assert stored_program.island_idx == 2
+                assert program_reads.list_by_generation(session, 0) == [stored_program]
+            read_db.close()
         finally:
-            repo.close()
-
-        db.close()
+            db.close()
 
 
 def test_island_family_context_is_composed_into_system_prompt():

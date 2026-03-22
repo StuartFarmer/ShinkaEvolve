@@ -6,9 +6,11 @@ from typing import TYPE_CHECKING, List, Optional
 
 import numpy as np
 
+from . import embedding_ops, program_reads
+from .connection import Database
+
 if TYPE_CHECKING:
     from .program import Program
-    from shinka.controllers.program_controller import ProgramController
 
 logger = logging.getLogger(__name__)
 
@@ -35,14 +37,14 @@ def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
 
 class SimilarityService:
     """
-    Controller-backed embedding similarity queries.
+    Database-backed embedding similarity queries.
 
     This owns vector math and nearest-neighbor lookup. It does not own novelty
     policy; callers decide what to do with the returned similarities.
     """
 
-    def __init__(self, programs: "ProgramController"):
-        self.programs = programs
+    def __init__(self, db: Database):
+        self.db = db
 
     def compute_similarity(
         self,
@@ -53,7 +55,8 @@ class SimilarityService:
             logger.warning("Empty code embedding provided to compute_similarity")
             return []
 
-        rows = self.programs.list_embeddings_by_island(island_idx)
+        with self.db.session() as session:
+            rows = embedding_ops.list_by_island(session, island_idx)
         return [
             cosine_similarity(code_embedding, embedding)
             for _, embedding in rows
@@ -71,14 +74,15 @@ class SimilarityService:
             )
             return None
 
-        rows = self.programs.list_embeddings_by_island(island_idx)
-        best: Optional[SimilarProgram] = None
-        for program_id, embedding in rows:
-            if not embedding:
-                continue
-            similarity = cosine_similarity(code_embedding, embedding)
-            if best is None or similarity > best.similarity:
-                program = self.programs.get(program_id)
-                if program is not None:
-                    best = SimilarProgram(program=program, similarity=similarity)
+        with self.db.session() as session:
+            rows = embedding_ops.list_by_island(session, island_idx)
+            best: Optional[SimilarProgram] = None
+            for program_id, embedding in rows:
+                if not embedding:
+                    continue
+                similarity = cosine_similarity(code_embedding, embedding)
+                if best is None or similarity > best.similarity:
+                    program = program_reads.get(session, program_id)
+                    if program is not None:
+                        best = SimilarProgram(program=program, similarity=similarity)
         return None if best is None else best.program

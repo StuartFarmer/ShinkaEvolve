@@ -335,13 +335,13 @@ class AsyncMetaSummarizer:
             if meta_cost > 0 and best_program and db_path:
                 try:
                     def update_metadata():
-                        from shinka.controllers import DatabaseController
+                        from shinka.database import Database, program_writes
 
-                        thread_repo = DatabaseController.open(
+                        thread_db = Database.open(
                             db_path=db_path,
                             num_islands=num_islands,
                             read_only=False,
-                        ).programs
+                        )
                         try:
                             if best_program.metadata is None:
                                 best_program.metadata = {}
@@ -353,12 +353,14 @@ class AsyncMetaSummarizer:
                             best_program.metadata["meta_cost"] = (
                                 existing_meta_cost + meta_cost
                             )
-                            thread_repo.update_program_metadata(
-                                best_program.id,
-                                best_program.metadata,
-                            )
+                            with thread_db.session_scope() as session:
+                                program_writes.update_program_metadata(
+                                    session,
+                                    best_program.id,
+                                    best_program.metadata,
+                                )
                         finally:
-                            thread_repo.close()
+                            thread_db.close()
 
                     loop = asyncio.get_event_loop()
                     await loop.run_in_executor(None, update_metadata)

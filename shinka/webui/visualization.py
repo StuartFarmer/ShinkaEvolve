@@ -24,8 +24,13 @@ import urllib.parse
 import webbrowser
 from typing import Optional, Dict, Any, Tuple
 
-from shinka.controllers import DatabaseController
-from shinka.database import SystemPromptConfig, SystemPromptDatabase
+from shinka.database import (
+    Database,
+    SystemPromptConfig,
+    SystemPromptDatabase,
+    inspiration_ops,
+    program_reads,
+)
 
 # We'll use a simple text-to-PDF approach instead of complex dependencies
 WEASYPRINT_AVAILABLE = False
@@ -229,12 +234,12 @@ class DatabaseRequestHandler(http.server.SimpleHTTPRequestHandler):
         for i in range(max_retries):
             db = None
             try:
-                db = DatabaseController.open(
+                db = Database.open(
                     db_path=abs_db_path,
                     read_only=True,
-                ).programs
-
-                programs = db.list_all()
+                )
+                with db.session() as session:
+                    programs = program_reads.list_all(session)
 
                 # Convert Program objects to dicts for JSON
                 programs_dict = [p.to_dict() for p in programs]
@@ -313,12 +318,12 @@ class DatabaseRequestHandler(http.server.SimpleHTTPRequestHandler):
         for i in range(max_retries):
             db = None
             try:
-                db = DatabaseController.open(
+                db = Database.open(
                     db_path=abs_db_path,
                     read_only=True,
-                ).programs
-
-                summaries = db.get_summaries()
+                )
+                with db.session() as session:
+                    summaries = program_reads.get_summaries(session)
                 self.send_json_response(summaries)
                 print(
                     f"[SERVER] Successfully served {len(summaries)} "
@@ -375,12 +380,12 @@ class DatabaseRequestHandler(http.server.SimpleHTTPRequestHandler):
         for i in range(max_retries):
             db = None
             try:
-                db = DatabaseController.open(
+                db = Database.open(
                     db_path=abs_db_path,
                     read_only=True,
-                ).programs
-
-                snapshot = db.get_count_snapshot()
+                )
+                with db.session() as session:
+                    snapshot = program_reads.get_count_snapshot(session)
                 result = {
                     "count": snapshot.count,
                     "max_timestamp": snapshot.max_timestamp,
@@ -437,28 +442,30 @@ class DatabaseRequestHandler(http.server.SimpleHTTPRequestHandler):
         for i in range(max_retries):
             db = None
             try:
-                db = DatabaseController.open(
+                db = Database.open(
                     db_path=abs_db_path,
                     read_only=True,
-                ).programs
+                )
+                with db.session() as session:
+                    program = program_reads.get(session, program_id)
+                    if program is None:
+                        self.send_error(404, f"Program not found: {program_id}")
+                        return
 
-                program = db.get(program_id)
-                if program is None:
-                    self.send_error(404, f"Program not found: {program_id}")
-                    return
-
-                response = program.to_dict()
-                response["inspirations"] = [
-                    {
-                        "child_program_id": inspiration.child_program_id,
-                        "source_program_id": inspiration.source_program_id,
-                        "role": inspiration.role,
-                        "order_index": inspiration.order_index,
-                        "weight": inspiration.weight,
-                        "metadata": inspiration.metadata,
-                    }
-                    for inspiration in db.get_inspiration_uses(program_id)
-                ]
+                    response = program.to_dict()
+                    response["inspirations"] = [
+                        {
+                            "child_program_id": inspiration.child_program_id,
+                            "source_program_id": inspiration.source_program_id,
+                            "role": inspiration.role,
+                            "order_index": inspiration.order_index,
+                            "weight": inspiration.weight,
+                            "metadata": inspiration.metadata,
+                        }
+                        for inspiration in inspiration_ops.list_for_child(
+                            session, program_id
+                        )
+                    ]
                 self.send_json_response(response)
                 return
 

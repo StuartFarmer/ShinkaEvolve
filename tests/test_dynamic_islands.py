@@ -3,10 +3,9 @@
 import tempfile
 from pathlib import Path
 
-from shinka.database import Program
+from shinka.database import Database, Program, island_ops, program_reads, run_state_ops
 from shinka.database.archive_policy import create_archive_policy
 from shinka.database.program_write_service import ProgramWriteService
-from shinka.controllers import DatabaseController
 
 
 class RuntimeHarness:
@@ -19,13 +18,11 @@ class RuntimeHarness:
         stagnation_threshold: int,
         island_spawn_strategy: str = "initial",
     ) -> None:
-        self.controller = DatabaseController.open(
+        self.db = Database.open(
             db_path=db_path,
             num_islands=num_islands,
             read_only=False,
         )
-        self.programs = self.controller.programs
-        self.metadata_repo = self.controller.run_state
         self.num_islands = num_islands
         self.enable_dynamic_islands = enable_dynamic_islands
         self.stagnation_threshold = stagnation_threshold
@@ -41,24 +38,22 @@ class RuntimeHarness:
             archive_criteria={"combined_score": 1.0},
         )
         self.write_service = ProgramWriteService(
-            programs=self.programs,
-            islands=self.controller.islands,
+            db=self.db,
             num_islands=num_islands,
             migration_interval=10,
             migration_rate=0.0,
             island_elitism=True,
             update_best_program=self._update_best_program,
-            update_metadata=self.programs.set_metadata,
             recompute_embeddings=None,
             print_program_summary=None,
             maybe_spawn_island=self.check_and_spawn_island_if_stagnant,
         )
 
-    def _update_best_program(self, program: Program) -> None:
+    def _update_best_program(self, session, program: Program) -> None:
         if not program.correct:
             return
         current_best = (
-            self.programs.get(self.best_program_id)
+            program_reads.get(session, self.best_program_id)
             if self.best_program_id
             else None
         )
@@ -68,15 +63,17 @@ class RuntimeHarness:
         new_score = float(program.combined_score or 0.0)
         if current_best_score is None or new_score > current_best_score:
             self.best_program_id = program.id
-            self.programs.set_metadata("best_program_id", program.id)
+            run_state_ops.set(session, "best_program_id", program.id)
             if self.best_score_ever is None or new_score > self.best_score_ever:
                 self.best_score_ever = new_score
                 self.best_score_generation = program.generation
-                self.programs.set_metadata(
+                run_state_ops.set(
+                    session,
                     "best_score_generation",
                     str(self.best_score_generation),
                 )
-                self.programs.set_metadata(
+                run_state_ops.set(
+                    session,
                     "best_score_ever",
                     str(self.best_score_ever),
                 )
@@ -94,25 +91,38 @@ class RuntimeHarness:
             return False
         return current_generation - self.best_score_generation >= self.stagnation_threshold
 
-    def check_and_spawn_island_if_stagnant(self, current_generation: int) -> bool:
+    def check_and_spawn_island_if_stagnant(self, session, current_generation: int) -> bool:
         if not self.is_stagnant(current_generation):
             return False
-        spawned = self.controller.islands.spawn_island(
-            self.programs,
+        spawned = island_ops.spawn_island(
+            session,
             self.archive_policy,
+            num_islands=self.num_islands,
             strategy=self.island_spawn_strategy,
             subtree_size=1,
         )
         if spawned:
             self.best_score_generation = current_generation
-            self.programs.set_metadata(
+            run_state_ops.set(
+                session,
                 "best_score_generation",
                 str(self.best_score_generation),
             )
         return spawned
 
+    def get_island_populations(self) -> dict[int, int]:
+        with self.db.session() as session:
+            return island_ops.get_island_populations(
+                session,
+                num_islands=self.num_islands,
+            )
+
+    def list_by_island(self, island_idx: int) -> list[Program]:
+        with self.db.session() as session:
+            return program_reads.list_by_island(session, island_idx)
+
     def close(self) -> None:
-        self.controller.close()
+        self.db.close()
 
 
 def test_stagnation_detection():
@@ -162,7 +172,7 @@ def test_dynamic_island_spawning():
                 island_idx=0,
             )
         )
-        initial_islands = runtime.controller.islands.get_island_populations()
+        initial_islands = runtime.get_island_populations()
 
         for gen in range(1, 5):
             runtime.add(
@@ -176,7 +186,7 @@ def test_dynamic_island_spawning():
                 )
             )
 
-        final_islands = runtime.controller.islands.get_island_populations()
+        final_islands = runtime.get_island_populations()
         assert len(final_islands) > len(initial_islands)
         assert max(final_islands.keys()) >= runtime.num_islands
         runtime.close()
@@ -202,7 +212,7 @@ def test_no_spawning_when_disabled():
                 island_idx=0,
             )
         )
-        initial_islands = runtime.controller.islands.get_island_populations()
+        initial_islands = runtime.get_island_populations()
 
         for gen in range(1, 10):
             runtime.add(
@@ -216,7 +226,7 @@ def test_no_spawning_when_disabled():
                 )
             )
 
-        final_islands = runtime.controller.islands.get_island_populations()
+        final_islands = runtime.get_island_populations()
         assert len(final_islands) == len(initial_islands)
         runtime.close()
 
@@ -319,11 +329,11 @@ def test_spawn_strategies():
                     )
                 )
 
-            final_islands = runtime.controller.islands.get_island_populations()
+            final_islands = runtime.get_island_populations()
             assert len(final_islands) > 2
 
             spawned_island_idx = max(final_islands.keys())
-            spawned = runtime.programs.list_by_island(spawned_island_idx)
+            spawned = runtime.list_by_island(spawned_island_idx)
             assert spawned
             metadata = spawned[0].metadata or {}
             assert metadata.get("_spawn_strategy") == strategy

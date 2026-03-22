@@ -15,8 +15,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict
 
-from shinka.controllers import DatabaseController
-from shinka.database import Program
+from shinka.database import Database, Program, program_reads
 
 
 # Allow running this file directly with `python tests/test_async_complexity_1000.py`
@@ -52,7 +51,7 @@ def build_program(prefix: str, idx: int) -> Program:
 
 async def _run_single_additions_with_complexity() -> float:
     from shinka.database.async_dbase import AsyncProgramDatabase
-    from shinka.database import async_dbase as async_dbase_module
+    from shinka.database import program_writes as program_writes_module
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "async_single.db"
@@ -67,8 +66,8 @@ async def _run_single_additions_with_complexity() -> float:
             embedding_recompute_interval=EMBEDDING_RECOMPUTE_INTERVAL,
         )
 
-        original_analyze = async_dbase_module.analyze_code_metrics
-        async_dbase_module.analyze_code_metrics = mock_analyze_code_metrics
+        original_analyze = program_writes_module.analyze_code_metrics
+        program_writes_module.analyze_code_metrics = mock_analyze_code_metrics
 
         try:
             start_time = time.time()
@@ -76,25 +75,29 @@ async def _run_single_additions_with_complexity() -> float:
                 await async_db.add_program_async(program=build_program("single", i))
             total_time = time.time() - start_time
 
-            repo = DatabaseController.open(
+            db = Database.open(
                 db_path=str(db_path),
                 num_islands=1,
                 read_only=True,
-            ).programs
-            sample_program = repo.get(f"single-{NUM_PROGRAMS // 2:04d}")
-            repo.close()
+            )
+            with db.session() as session:
+                sample_program = program_reads.get(
+                    session,
+                    f"single-{NUM_PROGRAMS // 2:04d}",
+                )
+            db.close()
             assert sample_program is not None
             assert sample_program.complexity > 0
             assert "code_analysis_metrics" in (sample_program.metadata or {})
             return total_time
         finally:
-            async_dbase_module.analyze_code_metrics = original_analyze
+            program_writes_module.analyze_code_metrics = original_analyze
             await async_db.close_async()
 
 
 async def _run_concurrent_additions_with_complexity() -> float:
     from shinka.database.async_dbase import AsyncProgramDatabase
-    from shinka.database import async_dbase as async_dbase_module
+    from shinka.database import program_writes as program_writes_module
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "async_concurrent.db"
@@ -109,8 +112,8 @@ async def _run_concurrent_additions_with_complexity() -> float:
             embedding_recompute_interval=EMBEDDING_RECOMPUTE_INTERVAL,
         )
 
-        original_analyze = async_dbase_module.analyze_code_metrics
-        async_dbase_module.analyze_code_metrics = mock_analyze_code_metrics
+        original_analyze = program_writes_module.analyze_code_metrics
+        program_writes_module.analyze_code_metrics = mock_analyze_code_metrics
 
         try:
             start_time = time.time()
@@ -126,19 +129,23 @@ async def _run_concurrent_additions_with_complexity() -> float:
             await asyncio.gather(*tasks)
             total_time = time.time() - start_time
 
-            repo = DatabaseController.open(
+            db = Database.open(
                 db_path=str(db_path),
                 num_islands=1,
                 read_only=True,
-            ).programs
-            sample_program = repo.get(f"conc-{(NUM_PROGRAMS * 3) // 4:04d}")
-            repo.close()
+            )
+            with db.session() as session:
+                sample_program = program_reads.get(
+                    session,
+                    f"conc-{(NUM_PROGRAMS * 3) // 4:04d}",
+                )
+            db.close()
             assert sample_program is not None
             assert sample_program.complexity > 0
             assert "code_analysis_metrics" in (sample_program.metadata or {})
             return total_time
         finally:
-            async_dbase_module.analyze_code_metrics = original_analyze
+            program_writes_module.analyze_code_metrics = original_analyze
             await async_db.close_async()
 
 

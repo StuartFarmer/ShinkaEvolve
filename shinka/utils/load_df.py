@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 from typing import Optional, Tuple, Union
 
-from shinka.controllers import DatabaseController
+from shinka.database import Database, program_reads
 
 
 def load_programs_to_df(
@@ -44,13 +44,14 @@ def load_programs_to_df(
         print(f"Error: Database file not found at {db_path_str}")
         return None
 
-    repo = None
+    db = None
     try:
-        repo = DatabaseController.open(
+        db = Database.open(
             db_path=str(db_file),
             read_only=True,
-        ).programs
-        programs = repo.list_all()
+        )
+        with db.session() as session:
+            programs = program_reads.list_all(session)
 
         if not programs:
             print(f"No programs found in the database: {db_path_str}")
@@ -127,10 +128,8 @@ def load_programs_to_df(
         print(f"JSON decoding error for metrics/metadata in {db_path}: {e}")
         return (None, None) if include_prompts else None
     finally:
-        if repo:
-            repo.close()
-        if conn:
-            conn.close()
+        if db:
+            db.close()
 
 
 def load_prompts_to_df(

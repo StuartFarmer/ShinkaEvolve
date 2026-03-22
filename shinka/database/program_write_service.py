@@ -3,10 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Optional
 
+from sqlalchemy.orm import Session
+
+from . import island_ops, program_writes
+from .connection import Database
+
 if TYPE_CHECKING:
     from .program import Program
-    from shinka.controllers.island_controller import IslandController
-    from shinka.controllers.program_controller import ProgramController
 
 
 @dataclass(frozen=True)
@@ -34,26 +37,22 @@ class ProgramWriteService:
     def __init__(
         self,
         *,
-        programs: "ProgramController",
-        islands: "IslandController",
+        db: Database,
         num_islands: int,
         migration_interval: int,
         migration_rate: float,
         island_elitism: bool,
-        update_best_program: Callable[["Program"], None],
-        update_metadata: Callable[[str, Optional[str]], None],
+        update_best_program: Callable[[Session, "Program"], None],
         recompute_embeddings: Optional[Callable[[], None]] = None,
         print_program_summary: Optional[Callable[["Program"], None]] = None,
-        maybe_spawn_island: Optional[Callable[[int], bool]] = None,
+        maybe_spawn_island: Optional[Callable[[Session, int], bool]] = None,
     ) -> None:
-        self.programs = programs
-        self.islands = islands
+        self.db = db
         self.num_islands = num_islands
         self.migration_interval = migration_interval
         self.migration_rate = migration_rate
         self.island_elitism = island_elitism
         self.update_best_program = update_best_program
-        self.update_metadata = update_metadata
         self.recompute_embeddings = recompute_embeddings
         self.print_program_summary = print_program_summary
         self.maybe_spawn_island = maybe_spawn_island
@@ -65,51 +64,47 @@ class ProgramWriteService:
         verbose: bool = False,
         current_last_iteration: int = 0,
     ) -> ProgramWriteResult:
-        self.islands.assign_program(program, num_islands=self.num_islands)
-        program_id = self.programs.add(program, verbose=False)
+        with self.db.session_scope() as session:
+            island_ops.assign_program(session, program, num_islands=self.num_islands)
+            program_id = program_writes.add_program(session, program, verbose=False)
+            self.update_best_program(session, program)
 
-        self.update_best_program(program)
+            last_iteration = max(current_last_iteration, int(program.generation))
+
+            if bool(program.metadata and program.metadata.get("_needs_island_copies")):
+                island_ops.copy_program_to_islands(
+                    session,
+                    program,
+                    num_islands=self.num_islands,
+                )
+                if program.metadata:
+                    program.metadata.pop("_needs_island_copies", None)
+                    program_writes.update_program_metadata(session, program.id, program.metadata)
+
+            spawned_island = False
+            if self.maybe_spawn_island is not None:
+                spawned_island = bool(self.maybe_spawn_island(session, program.generation))
+
+            ran_migration = False
+            if (
+                program.generation > 0
+                and self.migration_interval > 0
+                and (program.generation % self.migration_interval == 0)
+            ):
+                island_ops.perform_migration(
+                    session,
+                    num_islands=self.num_islands,
+                    migration_rate=self.migration_rate,
+                    island_elitism=self.island_elitism,
+                    current_generation=last_iteration,
+                )
+                ran_migration = True
 
         if self.recompute_embeddings is not None:
             self.recompute_embeddings()
 
-        last_iteration = current_last_iteration
-        if program.generation > last_iteration:
-            last_iteration = program.generation
-            self.update_metadata("last_iteration", str(last_iteration))
-
         if verbose and self.print_program_summary is not None:
             self.print_program_summary(program)
-
-        if bool(program.metadata and program.metadata.get("_needs_island_copies")):
-            self.islands.copy_program_to_islands(
-                self.programs,
-                program,
-                num_islands=self.num_islands,
-            )
-            if program.metadata:
-                program.metadata.pop("_needs_island_copies", None)
-                self.programs.update_program_metadata(program.id, program.metadata)
-                self.programs.commit()
-
-        spawned_island = False
-        if self.maybe_spawn_island is not None:
-            spawned_island = bool(self.maybe_spawn_island(program.generation))
-
-        ran_migration = False
-        if (
-            program.generation > 0
-            and self.migration_interval > 0
-            and (program.generation % self.migration_interval == 0)
-        ):
-            self.islands.perform_migration(
-                self.programs,
-                num_islands=self.num_islands,
-                migration_rate=self.migration_rate,
-                island_elitism=self.island_elitism,
-                current_generation=last_iteration,
-            )
-            ran_migration = True
 
         return ProgramWriteResult(
             program_id=program_id,

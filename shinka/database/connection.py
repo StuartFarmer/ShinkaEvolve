@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
+
+from .models import Base
 
 logger = logging.getLogger(__name__)
 
 
-class DatabaseConnection:
-    """Shared SQLite/SQLAlchemy connection state for controller instances."""
+class Database:
+    """SQLite/SQLAlchemy runtime for all persistence operations."""
 
     def __init__(
         self,
@@ -39,6 +42,7 @@ class DatabaseConnection:
             expire_on_commit=False,
             future=True,
         )
+        self._bootstrap()
 
     @classmethod
     def open(
@@ -47,7 +51,7 @@ class DatabaseConnection:
         db_path: str | None = None,
         num_islands: int = 2,
         read_only: bool = False,
-    ) -> "DatabaseConnection":
+    ) -> "Database":
         conn = cls._connect(db_path=db_path, read_only=read_only)
         conn.row_factory = sqlite3.Row
         return cls(
@@ -57,6 +61,19 @@ class DatabaseConnection:
             conn=conn,
             cursor=conn.cursor(),
         )
+
+    def _bootstrap(self) -> None:
+        self.cursor.execute("PRAGMA busy_timeout = 30000;")
+        self.cursor.execute("PRAGMA foreign_keys = ON;")
+        if self.read_only:
+            return
+        self.cursor.execute("PRAGMA journal_mode = WAL;")
+        self.cursor.execute("PRAGMA wal_autocheckpoint = 1000;")
+        self.cursor.execute("PRAGMA synchronous = NORMAL;")
+        self.cursor.execute("PRAGMA cache_size = -64000;")
+        self.cursor.execute("PRAGMA temp_store = MEMORY;")
+        Base.metadata.create_all(self.engine)
+        self.conn.commit()
 
     @staticmethod
     def _connect(
@@ -104,3 +121,22 @@ class DatabaseConnection:
 
     def close(self) -> None:
         self.conn.close()
+
+    def session(self) -> Session:
+        return self.SessionLocal()
+
+    @contextmanager
+    def session_scope(self):
+        session = self.session()
+        try:
+            yield session
+            if not self.read_only:
+                session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+
+DatabaseConnection = Database

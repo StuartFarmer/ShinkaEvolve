@@ -1,8 +1,13 @@
 from __future__ import annotations
 
-import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Optional
+
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from .models import MetadataRecord, ProgramRecord
 
 
 @dataclass(frozen=True)
@@ -26,43 +31,44 @@ class MetadataRepository:
     def __init__(
         self,
         *,
-        conn: sqlite3.Connection,
-        cursor: sqlite3.Cursor,
+        session_factory,
         read_only: bool = False,
     ) -> None:
-        self.conn = conn
-        self.cursor = cursor
+        self._session_factory = session_factory
         self.read_only = read_only
 
-    def ensure_schema(self) -> None:
-        if self.read_only:
+    @contextmanager
+    def _managed_session(self, session: Session | None = None):
+        if session is not None:
+            yield session
             return
-        self.cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS metadata_store (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            )
-            """
-        )
-        self.conn.commit()
+        managed = self._session_factory()
+        try:
+            yield managed
+        finally:
+            managed.close()
+
+    def ensure_schema(self) -> None:
+        return
 
     def get(self, key: str, default: Optional[str] = None) -> Optional[str]:
-        self.cursor.execute("SELECT value FROM metadata_store WHERE key = ?", (key,))
-        row = self.cursor.fetchone()
-        if not row:
+        with self._managed_session() as session:
+            record = session.get(MetadataRecord, key)
+        if not record:
             return default
-        value = row["value"]
+        value = record.value
         return default if value is None else str(value)
 
     def set(self, key: str, value: Optional[str]) -> None:
         if self.read_only:
             raise PermissionError("Cannot update metadata in read-only mode.")
-        self.cursor.execute(
-            "INSERT OR REPLACE INTO metadata_store (key, value) VALUES (?, ?)",
-            (key, value),
-        )
-        self.conn.commit()
+        with self._managed_session() as session:
+            record = session.get(MetadataRecord, key)
+            if record is None:
+                session.add(MetadataRecord(key=key, value=value))
+            else:
+                record.value = value
+            session.commit()
 
     def load_snapshot(self) -> RunMetadataSnapshot:
         last_iteration_raw = self.get("last_iteration")
@@ -82,15 +88,16 @@ class MetadataRepository:
         adjustment_raw = self.get("initial_program_count_adjustment")
 
         if adjustment_raw is None:
-            self.cursor.execute(
-                """
-                SELECT COUNT(*) as count
-                FROM programs
-                WHERE generation = 0 AND parent_id IS NULL
-                """
-            )
-            row = self.cursor.fetchone()
-            initial_root_count = int(row["count"]) if row else 0
+            with self._managed_session() as session:
+                initial_root_count = int(
+                    session.scalar(
+                        select(func.count()).select_from(ProgramRecord).where(
+                            ProgramRecord.generation == 0,
+                            ProgramRecord.parent_id.is_(None),
+                        )
+                    )
+                    or 0
+                )
             adjustment = max(initial_root_count - 1, 0)
             if not self.read_only:
                 self.set("initial_program_count_adjustment", str(adjustment))

@@ -18,6 +18,7 @@ import math
 import sqlite3
 import time
 import uuid
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -27,6 +28,13 @@ from sqlalchemy import create_engine, func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from .connector import DatabaseConnector
+from shinka.controllers.island_controller import IslandController
+from shinka.controllers.embedding_controller import EmbeddingController
+from shinka.controllers.inspiration_controller import InspirationController
+from shinka.controllers.metadata_controller import MetadataController
+from shinka.controllers.program_controller import ProgramController
+from shinka.controllers.run_state_controller import RunStateController
 from .complexity import analyze_code_metrics
 from .program import Program
 from .inspiration_repository import InspirationRepository, InspirationUse
@@ -91,9 +99,14 @@ class ProgramRepository:
         self.cursor: sqlite3.Cursor | None = None
         self.engine = None
         self.SessionLocal = None
+        self.connector: DatabaseConnector | None = None
 
         self.last_iteration: int = 0
         self.best_program_id: str | None = None
+        self.run_state_controller: RunStateController | None = None
+        self.metadata_controller: MetadataController | None = None
+        self.inspiration_controller: InspirationController | None = None
+        self.embedding_controller: EmbeddingController | None = None
         self.metadata_repo: MetadataRepository | None = None
         self.island_repo: IslandRepository | None = None
         self.inspiration_repo: InspirationRepository | None = None
@@ -127,33 +140,35 @@ class ProgramRepository:
         repo.db_path = db_path
         repo.num_islands = num_islands
         repo.read_only = read_only
-        repo.conn = conn
-        repo.cursor = cursor
-        repo.engine = create_engine(
-            "sqlite://",
-            creator=lambda: conn,
-            poolclass=StaticPool,
-            future=True,
-        )
-        repo.SessionLocal = sessionmaker(
-            bind=repo.engine,
-            expire_on_commit=False,
-            future=True,
-        )
-        repo.last_iteration = 0
-        repo.best_program_id = None
-        repo.metadata_repo = MetadataRepository(
+        repo.connector = DatabaseConnector(
+            db_path=db_path,
+            num_islands=num_islands,
+            read_only=read_only,
             conn=conn,
             cursor=cursor,
+        )
+        repo.conn = repo.connector.conn
+        repo.cursor = repo.connector.cursor
+        repo.engine = repo.connector.engine
+        repo.SessionLocal = repo.connector.SessionLocal
+        repo.last_iteration = 0
+        repo.best_program_id = None
+        repo.program_controller = ProgramController(repo.connector)
+        repo.run_state_controller = RunStateController(repo.connector)
+        repo.metadata_controller = MetadataController(repo.connector)
+        repo.inspiration_controller = InspirationController(repo.connector)
+        repo.embedding_controller = EmbeddingController(repo.connector)
+        repo.metadata_repo = MetadataRepository(
+            session_factory=repo.SessionLocal,
             read_only=read_only,
         )
         repo.inspiration_repo = InspirationRepository(
             session_factory=repo.SessionLocal,
             read_only=read_only,
         )
+        repo.island_controller = IslandController(repo.connector)
         repo.island_repo = IslandRepository(
-            conn=conn,
-            cursor=cursor,
+            session_factory=repo.SessionLocal,
             num_islands=num_islands,
         )
         if ensure_schema and not read_only:
@@ -162,52 +177,31 @@ class ProgramRepository:
         return repo
 
     def _connect(self) -> None:
-        db_path_str = self.db_path
-        if db_path_str:
-            db_file = Path(db_path_str).resolve()
-            if self.read_only:
-                if not db_file.exists():
-                    raise FileNotFoundError(
-                        f"Database file not found for read-only connection: {db_file}"
-                    )
-                self.conn = sqlite3.connect(
-                    f"file:{db_file}?mode=ro",
-                    uri=True,
-                    timeout=30.0,
-                )
-            else:
-                db_file.parent.mkdir(parents=True, exist_ok=True)
-                self.conn = sqlite3.connect(str(db_file), timeout=30.0)
-        else:
-            if self.read_only:
-                raise ValueError("Read-only repository requires db_path")
-            self.conn = sqlite3.connect(":memory:", timeout=30.0)
-
-        self.conn.row_factory = sqlite3.Row
-        self.cursor = self.conn.cursor()
-        self.engine = create_engine(
-            "sqlite://",
-            creator=lambda: self.conn,
-            poolclass=StaticPool,
-            future=True,
+        self.connector = DatabaseConnector.open(
+            db_path=self.db_path,
+            num_islands=self.num_islands,
+            read_only=self.read_only,
         )
-        self.SessionLocal = sessionmaker(
-            bind=self.engine,
-            expire_on_commit=False,
-            future=True,
-        )
+        self.conn = self.connector.conn
+        self.cursor = self.connector.cursor
+        self.engine = self.connector.engine
+        self.SessionLocal = self.connector.SessionLocal
+        self.program_controller = ProgramController(self.connector)
+        self.run_state_controller = RunStateController(self.connector)
+        self.metadata_controller = MetadataController(self.connector)
+        self.inspiration_controller = InspirationController(self.connector)
+        self.embedding_controller = EmbeddingController(self.connector)
         self.metadata_repo = MetadataRepository(
-            conn=self.conn,
-            cursor=self.cursor,
+            session_factory=self.SessionLocal,
             read_only=self.read_only,
         )
         self.inspiration_repo = InspirationRepository(
             session_factory=self.SessionLocal,
             read_only=self.read_only,
         )
+        self.island_controller = IslandController(self.connector)
         self.island_repo = IslandRepository(
-            conn=self.conn,
-            cursor=self.cursor,
+            session_factory=self.SessionLocal,
             num_islands=self.num_islands,
         )
 
@@ -232,23 +226,38 @@ class ProgramRepository:
         self.conn.commit()
 
     def _load_metadata(self) -> None:
-        if self.metadata_repo is None:
-            raise ConnectionError("Repository metadata store not initialized.")
-        snapshot = self.metadata_repo.load_snapshot()
+        if self.run_state_controller is None:
+            raise ConnectionError("Repository run state controller not initialized.")
+        snapshot = self.run_state_controller.load_snapshot()
         self.last_iteration = snapshot.last_iteration
         self.best_program_id = snapshot.best_program_id
 
     def _update_metadata(self, key: str, value: Optional[str]) -> None:
+        if self.run_state_controller is not None and key in RunStateController.SUPPORTED_KEYS:
+            self.run_state_controller.set(key, value)
+            return
         if self.metadata_repo is None:
             raise ConnectionError("Repository metadata store not initialized.")
         self.metadata_repo.set(key, value)
 
     def get_metadata(self, key: str, default: Optional[str] = None) -> Optional[str]:
-        if self.metadata_repo is None:
-            raise ConnectionError("Repository metadata store not initialized.")
-        return self.metadata_repo.get(key, default)
+        warnings.warn(
+            "ProgramRepository.get_metadata() is deprecated; use controller.metadata.get() or controller.run_state.get().",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if self.run_state_controller is not None and key in RunStateController.SUPPORTED_KEYS:
+            return self.run_state_controller.get(key, default)
+        if self.metadata_controller is None:
+            raise ConnectionError("Repository metadata controller not initialized.")
+        return self.metadata_controller.get(key, default)
 
     def set_metadata(self, key: str, value: Optional[str]) -> None:
+        warnings.warn(
+            "ProgramRepository.set_metadata() is deprecated; use controller.metadata.set() or controller.run_state.set().",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self._update_metadata(key, value)
 
     def _session(self) -> Session:
@@ -260,9 +269,9 @@ class ProgramRepository:
         self,
         child_program_ids: Sequence[str],
     ) -> Dict[str, Dict[str, List[str]]]:
-        if self.inspiration_repo is None:
-            raise ConnectionError("Repository inspiration store not initialized.")
-        uses_by_child = self.inspiration_repo.list_for_children(child_program_ids)
+        if self.inspiration_controller is None:
+            raise ConnectionError("Repository inspiration controller not initialized.")
+        uses_by_child = self.inspiration_controller.list_for_children(child_program_ids)
         index: Dict[str, Dict[str, List[str]]] = {
             child_id: {"archive": [], "top_k": [], "ancestor": []}
             for child_id in child_program_ids
@@ -675,9 +684,9 @@ class ProgramRepository:
                     .where(ProgramRecord.id == program.parent_id)
                     .values(children_count=ProgramRecord.children_count + 1)
                 )
-            if self.inspiration_repo is None:
-                raise ConnectionError("Repository inspiration store not initialized.")
-            self.inspiration_repo.replace_for_child(
+            if self.inspiration_controller is None:
+                raise ConnectionError("Repository inspiration controller not initialized.")
+            self.inspiration_controller.replace_for_child(
                 program.id,
                 self._program_inspiration_uses(program),
                 session=session,
@@ -712,9 +721,14 @@ class ProgramRepository:
         *,
         role: Optional[str] = None,
     ) -> List[InspirationUse]:
-        if self.inspiration_repo is None:
-            raise ConnectionError("Repository inspiration store not initialized.")
-        inspirations = self.inspiration_repo.list_for_child(child_program_id)
+        warnings.warn(
+            "ProgramRepository.get_inspiration_uses() is deprecated; use controller.inspirations.list_for_child().",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if self.inspiration_controller is None:
+            raise ConnectionError("Repository inspiration controller not initialized.")
+        inspirations = self.inspiration_controller.list_for_child(child_program_id)
         if role is not None:
             inspirations = [insp for insp in inspirations if insp.role == role]
         return inspirations
@@ -725,9 +739,14 @@ class ProgramRepository:
         *,
         role: Optional[str] = None,
     ) -> List[str]:
-        if self.inspiration_repo is None:
-            raise ConnectionError("Repository inspiration store not initialized.")
-        return self.inspiration_repo.list_sources_for_child(
+        warnings.warn(
+            "ProgramRepository.get_inspiration_source_ids() is deprecated; use controller.inspirations.list_sources_for_child().",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if self.inspiration_controller is None:
+            raise ConnectionError("Repository inspiration controller not initialized.")
+        return self.inspiration_controller.list_sources_for_child(
             child_program_id,
             role=role,
         )
@@ -738,9 +757,14 @@ class ProgramRepository:
         *,
         role: Optional[str] = None,
     ) -> List[str]:
-        if self.inspiration_repo is None:
-            raise ConnectionError("Repository inspiration store not initialized.")
-        return self.inspiration_repo.list_children_for_source(
+        warnings.warn(
+            "ProgramRepository.get_inspired_child_ids() is deprecated; use controller.inspirations.list_children_for_source().",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if self.inspiration_controller is None:
+            raise ConnectionError("Repository inspiration controller not initialized.")
+        return self.inspiration_controller.list_children_for_source(
             source_program_id,
             role=role,
         )
@@ -751,17 +775,27 @@ class ProgramRepository:
         *,
         role: Optional[str] = None,
     ) -> int:
-        if self.inspiration_repo is None:
-            raise ConnectionError("Repository inspiration store not initialized.")
-        return self.inspiration_repo.count_usage_by_source(
+        warnings.warn(
+            "ProgramRepository.count_inspiration_usage_by_source() is deprecated; use controller.inspirations.count_usage_by_source().",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if self.inspiration_controller is None:
+            raise ConnectionError("Repository inspiration controller not initialized.")
+        return self.inspiration_controller.count_usage_by_source(
             source_program_id,
             role=role,
         )
 
     def count_inspiration_usage_by_role(self, role: str) -> int:
-        if self.inspiration_repo is None:
-            raise ConnectionError("Repository inspiration store not initialized.")
-        return self.inspiration_repo.count_usage_by_role(role)
+        warnings.warn(
+            "ProgramRepository.count_inspiration_usage_by_role() is deprecated; use controller.inspirations.count_usage_by_role().",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if self.inspiration_controller is None:
+            raise ConnectionError("Repository inspiration controller not initialized.")
+        return self.inspiration_controller.count_usage_by_role(role)
 
     def get_children_count(self, program_id: str) -> int:
         with self._session() as session:
@@ -797,9 +831,7 @@ class ProgramRepository:
         return [by_id[program_id] for program_id in program_ids if by_id.get(program_id) is not None]
 
     def get_program_count(self) -> int:
-        if self.island_repo is None:
-            raise ConnectionError("Repository island view not initialized.")
-        return self.island_repo.get_program_count()
+        return self.island_controller.get_program_count()
 
     def count_by_island(self, island_idx: int) -> int:
         with self._session() as session:
@@ -813,26 +845,19 @@ class ProgramRepository:
             )
 
     def get_initial_program_row(self) -> Optional[dict[str, Any]]:
-        with self._session() as session:
-            record = session.scalar(
-                select(ProgramRecord)
-                .where(
-                    ProgramRecord.generation == 0,
-                    ProgramRecord.parent_id.is_(None),
-                )
-                .order_by(ProgramRecord.timestamp.asc())
-                .limit(1)
-            )
-        return None if record is None else self._record_to_program(record).to_dict()
+        row = self.program_controller.get_initial_program_row()
+        if row is None:
+            return None
+        return self.get(row["id"]).to_dict()
 
     def get_best_program_row(self) -> Optional[dict[str, Any]]:
-        best = self.get_best()
-        return None if best is None else best.to_dict()
+        row = self.program_controller.get_best_program_row()
+        if row is None:
+            return None
+        return self.get(row["id"]).to_dict()
 
     def get_next_island_index(self) -> int:
-        if self.island_repo is None:
-            raise ConnectionError("Repository island view not initialized.")
-        return self.island_repo.get_next_island_index()
+        return self.island_controller.get_next_island_index()
 
     def list_migrant_ids(
         self,
@@ -1243,39 +1268,24 @@ class ProgramRepository:
         self,
         island_idx: int,
     ) -> List[tuple[str, list[float]]]:
-        with self._session() as session:
-            rows = session.execute(
-                select(
-                    ProgramEmbeddingRecord.program_id,
-                    ProgramEmbeddingRecord.vector_json,
-                )
-                .join(ProgramRecord, ProgramRecord.id == ProgramEmbeddingRecord.program_id)
-                .where(
-                    ProgramRecord.island_idx == island_idx,
-                    ProgramEmbeddingRecord.vector_json.is_not(None),
-                )
-            ).all()
-        return [
-            (str(program_id), list(embedding or []))
-            for program_id, embedding in rows
-            if embedding not in (None, [])
-        ]
+        warnings.warn(
+            "ProgramRepository.list_embeddings_by_island() is deprecated; use controller.embeddings.list_by_island().",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if self.embedding_controller is None:
+            raise ConnectionError("Repository embedding controller not initialized.")
+        return self.embedding_controller.list_by_island(island_idx)
 
     def list_all_embeddings(self) -> List[tuple[str, list[float]]]:
-        with self._session() as session:
-            rows = session.execute(
-                select(
-                    ProgramEmbeddingRecord.program_id,
-                    ProgramEmbeddingRecord.vector_json,
-                ).where(
-                    ProgramEmbeddingRecord.vector_json.is_not(None),
-                )
-            ).all()
-        return [
-            (str(program_id), list(embedding or []))
-            for program_id, embedding in rows
-            if embedding not in (None, [])
-        ]
+        warnings.warn(
+            "ProgramRepository.list_all_embeddings() is deprecated; use controller.embeddings.list_all().",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if self.embedding_controller is None:
+            raise ConnectionError("Repository embedding controller not initialized.")
+        return self.embedding_controller.list_all()
 
     def update_embedding_features(
         self,
@@ -1285,63 +1295,19 @@ class ProgramRepository:
         embedding_pca_3d: list[float],
         embedding_cluster_id: int,
     ) -> None:
-        if self.read_only:
-            raise PermissionError("Cannot update embedding features in read-only mode.")
-        with self._session() as session:
-            embedding_record = session.scalar(
-                select(ProgramEmbeddingRecord).where(
-                    ProgramEmbeddingRecord.program_id == program_id
-                )
-            )
-            if embedding_record is None:
-                embedding_record = ProgramEmbeddingRecord(
-                    id=str(uuid.uuid4()),
-                    program_id=program_id,
-                    vector_json=[],
-                    model_name=None,
-                    embedding_metadata_json={},
-                )
-                session.add(embedding_record)
-                session.flush()
-            projection_2d = session.scalar(
-                select(ProgramEmbeddingProjectionRecord).where(
-                    ProgramEmbeddingProjectionRecord.program_id == program_id,
-                    ProgramEmbeddingProjectionRecord.kind == "pca_2d",
-                )
-            )
-            if projection_2d is None:
-                projection_2d = ProgramEmbeddingProjectionRecord(
-                    id=str(uuid.uuid4()),
-                    program_id=program_id,
-                    embedding_id=embedding_record.id,
-                    kind="pca_2d",
-                    coords_json=[],
-                    cluster_id=None,
-                    projection_metadata_json={},
-                )
-                session.add(projection_2d)
-            projection_3d = session.scalar(
-                select(ProgramEmbeddingProjectionRecord).where(
-                    ProgramEmbeddingProjectionRecord.program_id == program_id,
-                    ProgramEmbeddingProjectionRecord.kind == "pca_3d",
-                )
-            )
-            if projection_3d is None:
-                projection_3d = ProgramEmbeddingProjectionRecord(
-                    id=str(uuid.uuid4()),
-                    program_id=program_id,
-                    embedding_id=embedding_record.id,
-                    kind="pca_3d",
-                    coords_json=[],
-                    cluster_id=None,
-                    projection_metadata_json={},
-                )
-                session.add(projection_3d)
-            projection_2d.coords_json = _clean_nan_values(embedding_pca_2d)
-            projection_2d.cluster_id = int(embedding_cluster_id)
-            projection_3d.coords_json = _clean_nan_values(embedding_pca_3d)
-            projection_3d.cluster_id = int(embedding_cluster_id)
-            session.commit()
+        warnings.warn(
+            "ProgramRepository.update_embedding_features() is deprecated; use controller.embeddings.update_features().",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if self.embedding_controller is None:
+            raise ConnectionError("Repository embedding controller not initialized.")
+        self.embedding_controller.update_features(
+            program_id=program_id,
+            embedding_pca_2d=embedding_pca_2d,
+            embedding_pca_3d=embedding_pca_3d,
+            embedding_cluster_id=embedding_cluster_id,
+        )
 
     def commit(self) -> None:
         if self.conn and not self.read_only:
@@ -1460,19 +1426,13 @@ class ProgramRepository:
         )
 
     def list_initialized_islands(self) -> List[Island]:
-        if self.island_repo is None:
-            raise ConnectionError("Repository island view not initialized.")
-        return self.island_repo.list_initialized_islands()
+        return self.island_controller.list_initialized_islands()
 
     def list_initialized_island_ids(self) -> List[int]:
-        if self.island_repo is None:
-            raise ConnectionError("Repository island view not initialized.")
-        return self.island_repo.list_initialized_island_ids()
+        return self.island_controller.list_initialized_island_ids()
 
     def list_islands(self) -> List[Island]:
-        if self.island_repo is None:
-            raise ConnectionError("Repository island view not initialized.")
-        return self.island_repo.list_islands()
+        return self.island_controller.list_islands()
 
     def get_island_program_counts(
         self,

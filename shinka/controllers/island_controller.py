@@ -1,51 +1,23 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
-from .models import ProgramEvaluationRecord, ProgramRecord
+from shinka.database.connector import DatabaseConnector
+from shinka.database.island_repository import Island
+from shinka.database.models import ProgramEvaluationRecord, ProgramRecord
 
 
-@dataclass(frozen=True)
-class Island:
-    """
-    Computed island domain object.
+class IslandController:
+    """Island-scoped computed view/controller over persisted programs."""
 
-    Islands are not persisted as first-class rows today. They are reconstructed
-    from the `programs` table by grouping on `island_idx`.
-    """
-
-    island_idx: int
-    total_programs: int = 0
-    correct_programs: int = 0
-    best_program_id: Optional[str] = None
-    best_score: float = 0.0
-
-    @property
-    def initialized(self) -> bool:
-        return self.correct_programs > 0
-
-
-class IslandRepository:
-    """
-    Query boundary for island-scoped persisted facts.
-
-    This repository exposes only island-related storage queries. Island search
-    behavior still lives in strategies/services above it.
-    """
-
-    def __init__(
-        self,
-        *,
-        session_factory,
-        num_islands: int,
-    ) -> None:
-        self._session_factory = session_factory
-        self.num_islands = num_islands
+    def __init__(self, connector: DatabaseConnector) -> None:
+        self.connector = connector
+        self._session_factory = connector.SessionLocal
+        self.num_islands = connector.num_islands
 
     @contextmanager
     def _managed_session(self, session: Session | None = None):
@@ -64,14 +36,19 @@ class IslandRepository:
                 select(ProgramRecord.island_idx).where(ProgramRecord.id == program_id)
             )
 
-    def list_islands(self) -> List[Island]:
-        """
-        Return computed islands from persisted programs.
+    def get_program_count(self) -> int:
+        with self._managed_session() as session:
+            return int(session.scalar(select(func.count()).select_from(ProgramRecord)) or 0)
 
-        The configured base islands are always represented, even if empty.
-        Dynamically spawned islands are included up to the max observed
-        `island_idx`.
-        """
+    def get_max_island_index(self) -> int:
+        with self._managed_session() as session:
+            value = session.scalar(select(func.max(ProgramRecord.island_idx)))
+        return int(value) if value is not None else -1
+
+    def get_next_island_index(self) -> int:
+        return max(self.get_max_island_index() + 1, self.num_islands)
+
+    def list_islands(self) -> List[Island]:
         max_idx = self.get_max_island_index()
         upper_bound = max(max_idx, self.num_islands - 1)
         if upper_bound < 0:
@@ -114,9 +91,9 @@ class IslandRepository:
                 if row is None:
                     islands.append(Island(island_idx=island_idx))
                     continue
-                best_score_raw = row.best_score
+
                 best_program_id = None
-                if best_score_raw is not None:
+                if row.best_score is not None:
                     best_program_id = session.scalar(
                         select(ProgramRecord.id)
                         .join(
@@ -141,16 +118,10 @@ class IslandRepository:
                         total_programs=int(row.total_programs or 0),
                         correct_programs=int(row.correct_programs or 0),
                         best_program_id=str(best_program_id) if best_program_id else None,
-                        best_score=float(best_score_raw) if best_score_raw is not None else 0.0,
+                        best_score=float(row.best_score) if row.best_score is not None else 0.0,
                     )
                 )
             return islands
-
-    def get_island(self, island_idx: int) -> Island:
-        for island in self.list_islands():
-            if island.island_idx == island_idx:
-                return island
-        return Island(island_idx=island_idx)
 
     def list_initialized_islands(self) -> List[Island]:
         return [island for island in self.list_islands() if island.initialized]
@@ -166,20 +137,4 @@ class IslandRepository:
     def get_island_populations(self) -> Dict[int, int]:
         if self.num_islands <= 0:
             return {}
-        return {
-            island.island_idx: island.total_programs
-            for island in self.list_islands()
-        }
-
-    def get_program_count(self) -> int:
-        with self._managed_session() as session:
-            return int(session.scalar(select(func.count()).select_from(ProgramRecord)) or 0)
-
-    def get_max_island_index(self) -> int:
-        with self._managed_session() as session:
-            value = session.scalar(select(func.max(ProgramRecord.island_idx)))
-        return int(value) if value is not None else -1
-
-    def get_next_island_index(self) -> int:
-        max_idx = self.get_max_island_index()
-        return max(max_idx + 1, self.num_islands)
+        return {island.island_idx: island.total_programs for island in self.list_islands()}

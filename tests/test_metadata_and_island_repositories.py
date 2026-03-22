@@ -1,12 +1,9 @@
 import tempfile
 from pathlib import Path
 
-from shinka.database import (
-    IslandRepository,
-    MetadataRepository,
-    Program,
-    ProgramRepository,
-)
+from shinka.controllers import DatabaseController, ProgramController, RunStateController
+from shinka.database import IslandRepository, MetadataRepository, Program, ProgramRepository
+from shinka.database.connector import DatabaseConnector
 
 
 def _program(program_id: str, *, generation: int = 0, island_idx: int = 0) -> Program:
@@ -25,12 +22,51 @@ def test_metadata_repository_loads_and_persists_run_state():
         db_path = Path(tmpdir) / "metadata_repo.db"
         db = ProgramRepository(str(db_path), num_islands=2, read_only=False)
         try:
-            repo = MetadataRepository(conn=db.conn, cursor=db.cursor, read_only=False)
+            connector = DatabaseConnector(
+                db_path=str(db_path),
+                num_islands=2,
+                read_only=False,
+                conn=db.conn,
+                cursor=db.cursor,
+            )
+            repo = MetadataRepository(
+                session_factory=db.SessionLocal,
+                read_only=False,
+            )
             repo.set("best_program_id", "prog-1")
             repo.set("beam_search_parent_id", "prog-2")
             repo.set("best_score_generation", "7")
             repo.set("best_score_ever", "12.5")
             snapshot = repo.load_snapshot()
+
+            assert snapshot.best_program_id == "prog-1"
+            assert snapshot.beam_search_parent_id == "prog-2"
+            assert snapshot.best_score_generation == 7
+            assert snapshot.best_score_ever == 12.5
+        finally:
+            db.close()
+
+
+def test_run_state_controller_loads_and_persists_typed_run_state():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "run_state.db"
+        db = ProgramRepository(str(db_path), num_islands=2, read_only=False)
+        try:
+            db.add(_program("prog-1", generation=0, island_idx=0))
+            db.add(_program("prog-2", generation=1, island_idx=1))
+            connector = DatabaseConnector(
+                db_path=str(db_path),
+                num_islands=2,
+                read_only=False,
+                conn=db.conn,
+                cursor=db.cursor,
+            )
+            controller = RunStateController(connector)
+            controller.set("best_program_id", "prog-1")
+            controller.set("beam_search_parent_id", "prog-2")
+            controller.set("best_score_generation", "7")
+            controller.set("best_score_ever", "12.5")
+            snapshot = controller.load_snapshot()
 
             assert snapshot.best_program_id == "prog-1"
             assert snapshot.beam_search_parent_id == "prog-2"
@@ -47,12 +83,20 @@ def test_island_repository_reports_island_state():
         try:
             db.add(_program("p0", generation=0, island_idx=0))
             db.add(_program("p1", generation=1, island_idx=2))
-
-            repo = IslandRepository(
+            connector = DatabaseConnector(
+                db_path=str(db_path),
+                num_islands=db.num_islands,
+                read_only=False,
                 conn=db.conn,
                 cursor=db.cursor,
+            )
+
+            repo = IslandRepository(
+                session_factory=db.SessionLocal,
                 num_islands=db.num_islands,
             )
+            root_controller = DatabaseController(connector)
+            program_controller = root_controller.programs
 
             assert repo.get_program_island("p1") == 2
             initialized = repo.list_initialized_islands()
@@ -62,7 +106,57 @@ def test_island_repository_reports_island_state():
             assert islands[1].initialized is False
             assert repo.get_island_populations() == {0: 1, 1: 0, 2: 1}
             assert repo.get_next_island_index() == 3
-            assert repo.get_best_program_row()["id"] == "p1"
-            assert repo.get_initial_program_row()["id"] == "p0"
+            assert program_controller.get_best_program_row()["id"] == "p1"
+            assert program_controller.get_initial_program_row()["id"] == "p0"
+        finally:
+            db.close()
+
+
+def test_database_controller_facade_exposes_metadata_inspirations_and_embeddings():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "controller_facade.db"
+        db = ProgramRepository(str(db_path), num_islands=2, read_only=False)
+        try:
+            parent = _program("parent", generation=0, island_idx=0)
+            child = Program(
+                id="child",
+                code="def run():\n    return 2\n",
+                correct=True,
+                combined_score=2.0,
+                generation=1,
+                island_idx=0,
+                parent_id="parent",
+                archive_inspiration_ids=["parent"],
+                top_k_inspiration_ids=["parent"],
+            )
+            db.add(parent)
+            db.add(child)
+
+            connector = DatabaseConnector(
+                db_path=str(db_path),
+                num_islands=2,
+                read_only=False,
+                conn=db.conn,
+                cursor=db.cursor,
+            )
+            controller = DatabaseController(connector)
+
+            controller.metadata.set("custom_key", "custom_value")
+            assert controller.metadata.get("custom_key") == "custom_value"
+
+            assert controller.inspirations.list_sources_for_child("child") == [
+                "parent",
+                "parent",
+            ]
+            assert controller.inspirations.count_usage_by_role("archive") == 1
+
+            controller.embeddings.update_features(
+                program_id="child",
+                embedding_pca_2d=[1.0, 2.0],
+                embedding_pca_3d=[1.0, 2.0, 3.0],
+                embedding_cluster_id=7,
+            )
+            all_embeddings = controller.embeddings.list_all()
+            assert isinstance(all_embeddings, list)
         finally:
             db.close()

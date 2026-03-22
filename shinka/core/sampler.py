@@ -1,7 +1,7 @@
 from typing import List, Optional, Tuple, Literal
 import numpy as np
 from shinka.database import Program
-from shinka.database.inspirations import InspirationContextBuilder
+from shinka.core.inspiration_context import InspirationContextBuilder
 from shinka.prompts import (
     construct_eval_history_msg,
     perf_str,

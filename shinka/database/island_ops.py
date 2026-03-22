@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
+from .archive_policy import pick_random_archive_program
 from . import program_reads, program_writes
 from .models import ProgramEvaluationRecord, ProgramRecord
 from .program import Program
@@ -275,7 +276,10 @@ def _select_spawn_source_row(
     if strategy == "best":
         return program_reads.get_best_program_row(session)
     if strategy == "archive_random":
-        program = archive_policy.pick_random(program_reads.list_correct(session))
+        program = pick_random_archive_program(
+            program_reads.list_correct(session),
+            archive_policy,
+        )
         return None if program is None else program.to_dict()
     return program_reads.get_initial_program_row(session)
 

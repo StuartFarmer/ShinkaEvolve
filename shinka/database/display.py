@@ -208,7 +208,7 @@ class DatabaseDisplay:
         _console = self._console(console)
         all_programs = self._all_programs()
         correct_programs = [program for program in all_programs if program.correct]
-        archive_programs = self.archive_policy.compute(correct_programs)
+        archive_programs = self.archive_policy(correct_programs)
         best_program = self._best_program()
         (
             total_api_cost,

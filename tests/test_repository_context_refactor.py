@@ -125,10 +125,8 @@ def test_fitness_archive_policy_recomputes_from_programs(tmp_path):
             program_writes.add_program(session, program)
 
     with db.session() as session:
-        archive = FitnessArchivePolicy(archive_size=2).compute(
-            program_reads.list_all(session)
-        )
-    assert [program.id for program in archive] == [p2.id, p3.id]
+        archive = FitnessArchivePolicy(archive_size=2)(program_reads.list_all(session))
+        assert [program.id for program in archive] == [p2.id, p3.id]
 
     db.close()
 
@@ -277,5 +275,3 @@ def test_context_sampler_fix_mode_returns_incorrect_parent_with_ancestry(tmp_pat
         assert [program.id for program in sampled.archive_inspirations] == [root.id]
 
     db.close()
-
-    repo.close()

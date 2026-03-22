@@ -12,11 +12,11 @@ import asyncio
 import random
 import warnings
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 import numpy as np
 
-from shinka.core.search_policies import InspirationSelector, ParentSelector
+from shinka.core.search_policies import ParentSelector, sort_programs_by_score
 from shinka.database import island_ops, program_reads
 from shinka.database.archive_policy import ArchivePolicy, create_archive_policy
 from shinka.database.connection import Database
@@ -47,7 +47,8 @@ class ContextSampler:
         *,
         archive_policy: Optional[ArchivePolicy] = None,
         parent_selector: Optional[ParentSelector] = None,
-        inspiration_selector: Optional[InspirationSelector] = None,
+        archive_query: Optional[Callable[[List[Program]], List[Program]]] = None,
+        top_k_query: Optional[Callable[[List[Program]], List[Program]]] = None,
         num_islands: Optional[int] = None,
         island_selection_strategy: str = "uniform",
         num_archive_inspirations: int = 1,
@@ -64,17 +65,17 @@ class ContextSampler:
         self.island_selection_strategy = island_selection_strategy
         self.num_archive_inspirations = num_archive_inspirations
         self.num_top_k_inspirations = num_top_k_inspirations
-        self.archive_policy = archive_policy or create_archive_policy()
+        selected_archive_policy = archive_policy or create_archive_policy()
+        self.archive_query = archive_query or selected_archive_policy
+        self.top_k_query = top_k_query or sort_programs_by_score
         self.parent_selector = parent_selector or ParentSelector(
             parent_selection_strategy=parent_selection_strategy,
             exploitation_alpha=exploitation_alpha,
             parent_selection_lambda=parent_selection_lambda,
             num_beams=num_beams,
         )
-        self.inspiration_selector = inspiration_selector or InspirationSelector(
-            enforce_island_separation=enforce_island_separation,
-            elite_selection_ratio=elite_selection_ratio,
-        )
+        self.enforce_island_separation = enforce_island_separation
+        self.elite_selection_ratio = elite_selection_ratio
 
     def sample(
         self,
@@ -139,17 +140,9 @@ class ContextSampler:
                 max_resample_attempts=max_resample_attempts,
             )
 
-        archive_inspirations = self.inspiration_selector.select_archive(
-            self.db,
+        archive_inspirations, top_k_inspirations = self._select_inspirations(
             parent,
             archive_programs,
-            n=self.num_archive_inspirations,
-        )
-        top_k_inspirations = self.inspiration_selector.select_top_k(
-            parent,
-            archive_programs,
-            excluded_programs=archive_inspirations,
-            k=self.num_top_k_inspirations,
         )
 
         return SampledContext(
@@ -167,7 +160,73 @@ class ContextSampler:
 
     def _compute_archive(self) -> List[Program]:
         with self.db.session() as session:
-            return self.archive_policy.compute(program_reads.list_correct(session))
+            return self.archive_query(program_reads.list_correct(session))
+
+    def _inspiration_candidates(self, parent: Program) -> List[Program]:
+        island_idx = None
+        if self.enforce_island_separation:
+            if parent.island_idx is None:
+                return []
+            island_idx = parent.island_idx
+        with self.db.session() as session:
+            return program_reads.list_correct(session, island_idx=island_idx)
+
+    def _select_inspirations(
+        self,
+        parent: Program,
+        archive_programs: List[Program],
+    ) -> tuple[List[Program], List[Program]]:
+        candidates = self._inspiration_candidates(parent)
+        archive_candidates = [
+            program
+            for program in self.archive_query(candidates)
+            if program.correct and program.id != parent.id
+        ]
+
+        archive_inspirations = self._pick_archive_inspirations(
+            archive_candidates,
+            n=self.num_archive_inspirations,
+        )
+
+        excluded_ids = {parent.id}
+        excluded_ids.update(program.id for program in archive_inspirations)
+        top_k_inspirations = [
+            program
+            for program in self.top_k_query(candidates)
+            if program.correct and program.id not in excluded_ids
+        ][: self.num_top_k_inspirations]
+
+        if not self.enforce_island_separation and len(top_k_inspirations) < self.num_top_k_inspirations:
+            ranked_archive = [
+                program
+                for program in sort_programs_by_score(archive_programs)
+                if program.correct and program.id not in excluded_ids
+            ]
+            for program in ranked_archive:
+                if len(top_k_inspirations) >= self.num_top_k_inspirations:
+                    break
+                top_k_inspirations.append(program)
+                excluded_ids.add(program.id)
+
+        return archive_inspirations, top_k_inspirations
+
+    def _pick_archive_inspirations(
+        self,
+        archive_candidates: List[Program],
+        *,
+        n: int,
+    ) -> List[Program]:
+        if n <= 0 or not archive_candidates:
+            return []
+
+        num_elites = max(0, min(n, int(n * self.elite_selection_ratio)))
+        ranked = sort_programs_by_score(archive_candidates)
+        inspirations = list(ranked[:num_elites])
+
+        remaining = ranked[num_elites:]
+        random.shuffle(remaining)
+        inspirations.extend(remaining[: max(0, n - len(inspirations))])
+        return inspirations[:n]
 
     def _are_all_islands_initialized(self) -> bool:
         with self.db.session() as session:

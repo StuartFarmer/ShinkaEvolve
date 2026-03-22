@@ -2,9 +2,17 @@ import importlib.util
 import json
 import os
 import time
+import errno
+import multiprocessing as mp
 import numpy as np
 import pickle
-from concurrent.futures import Future, ProcessPoolExecutor, as_completed
+from concurrent.futures import (
+    Executor,
+    Future,
+    ProcessPoolExecutor,
+    ThreadPoolExecutor,
+    as_completed,
+)
 from typing import Callable, Any, Dict, List, Tuple, Optional, Union
 
 from shinka.utils.eval_stop import (
@@ -22,6 +30,95 @@ DEFAULT_METRICS_ON_ERROR = {
     "num_invalid_runs": 0,
     "all_validation_errors": [],
 }
+
+
+def _is_process_pool_permission_error(exc: BaseException) -> bool:
+    if isinstance(exc, (PermissionError, OSError)) and getattr(exc, "errno", None) == errno.EPERM:
+        return True
+    message = str(exc).lower()
+    return "operation not permitted" in message
+
+
+def _run_parallel_evaluations(
+    *,
+    executor_factory: Callable[[int], Executor],
+    effective_run_workers: int,
+    num_runs: int,
+    program_path: str,
+    experiment_fn_name: str,
+    get_experiment_kwargs: Optional[Callable[[int], Dict[str, Any]]],
+) -> Tuple[List[Any], List[float]]:
+    ordered_run_results: List[Any] = [None] * num_runs
+    ordered_execution_times: List[float] = [0.0] * num_runs
+    run_completed: List[bool] = [False] * num_runs
+    futures_to_indices: Dict[Future[Tuple[int, Any, float]], int] = {}
+
+    with executor_factory(effective_run_workers) as executor:
+        for i in range(num_runs):
+            print(
+                f"{10 * '='}Running program evaluation {i + 1}/{num_runs}...{10 * '='}"
+            )
+            kwargs: Dict[str, Any] = (
+                get_experiment_kwargs(i)
+                if get_experiment_kwargs
+                else {"seed": i + 1}
+            )
+            try:
+                future = executor.submit(
+                    _run_single_evaluation,
+                    program_path,
+                    experiment_fn_name,
+                    i,
+                    kwargs,
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to submit run {i + 1}/{num_runs} for "
+                    f"parallel execution: {e}. Ensure kwargs are "
+                    "pickle-serializable."
+                ) from e
+            futures_to_indices[future] = i
+
+        for future in as_completed(futures_to_indices):
+            submitted_idx = futures_to_indices[future]
+            try:
+                completed_idx, run_result, run_time = future.result()
+            except Exception as e:
+                err_msg = str(e)
+                pickle_hint = ""
+                if "pickle" in err_msg.lower():
+                    pickle_hint = (
+                        " Ensure experiment kwargs and return values "
+                        "are pickle-serializable."
+                    )
+                raise RuntimeError(
+                    f"Run {submitted_idx + 1}/{num_runs} failed in "
+                    f"parallel evaluation: {err_msg}.{pickle_hint}"
+                ) from e
+
+            ordered_run_results[completed_idx] = run_result
+            ordered_execution_times[completed_idx] = run_time
+            run_completed[completed_idx] = True
+
+    all_run_results: List[Any] = []
+    execution_times: List[float] = []
+    for i in range(num_runs):
+        if not run_completed[i]:
+            raise RuntimeError(
+                f"Run {i + 1}/{num_runs} did not complete in parallel mode."
+            )
+
+        run_result = ordered_run_results[i]
+        run_time = ordered_execution_times[i]
+        all_run_results.append(run_result)
+        execution_times.append(run_time)
+
+        print(
+            f"{10 * '='}Run {i + 1}/{num_runs} completed in "
+            f"{run_time:.2f} seconds{10 * '='}"
+        )
+
+    return all_run_results, execution_times
 
 
 def load_program(program_path: str) -> Any:
@@ -230,66 +327,40 @@ def run_shinka_eval(
                 f"Parallel evaluation enabled with {effective_run_workers} worker(s) "
                 f"for {num_runs} run(s)"
             )
-            ordered_run_results: List[Any] = [None] * num_runs
-            ordered_execution_times: List[float] = [0.0] * num_runs
-            run_completed: List[bool] = [False] * num_runs
-            futures_to_indices: Dict[Future[Tuple[int, Any, float]], int] = {}
+            def _process_executor_factory(max_workers: int) -> Executor:
+                return ProcessPoolExecutor(
+                    max_workers=max_workers,
+                    mp_context=mp.get_context("spawn"),
+                )
 
-            with ProcessPoolExecutor(max_workers=effective_run_workers) as executor:
-                for i in range(num_runs):
-                    print(
-                        f"{10 * '='}Running program evaluation {i + 1}/{num_runs}...{10 * '='}"
-                    )
-                    kwargs: Dict[str, Any] = (
-                        get_experiment_kwargs(i)
-                        if get_experiment_kwargs
-                        else {"seed": i + 1}
-                    )
-                    try:
-                        future = executor.submit(
-                            _run_single_evaluation,
-                            program_path,
-                            experiment_fn_name,
-                            i,
-                            kwargs,
-                        )
-                    except Exception as e:
-                        raise RuntimeError(
-                            f"Failed to submit run {i + 1}/{num_runs} for "
-                            f"parallel execution: {e}. Ensure kwargs are "
-                            "pickle-serializable."
-                        ) from e
-                    futures_to_indices[future] = i
+            try:
+                parallel_results, parallel_times = _run_parallel_evaluations(
+                    executor_factory=_process_executor_factory,
+                    effective_run_workers=effective_run_workers,
+                    num_runs=num_runs,
+                    program_path=program_path,
+                    experiment_fn_name=experiment_fn_name,
+                    get_experiment_kwargs=get_experiment_kwargs,
+                )
+            except Exception as e:
+                if not _is_process_pool_permission_error(e):
+                    raise
+                print(
+                    "Process-based parallel evaluation unavailable in this environment; "
+                    "falling back to thread-based parallel evaluation."
+                )
+                parallel_results, parallel_times = _run_parallel_evaluations(
+                    executor_factory=lambda max_workers: ThreadPoolExecutor(
+                        max_workers=max_workers
+                    ),
+                    effective_run_workers=effective_run_workers,
+                    num_runs=num_runs,
+                    program_path=program_path,
+                    experiment_fn_name=experiment_fn_name,
+                    get_experiment_kwargs=get_experiment_kwargs,
+                )
 
-                for future in as_completed(futures_to_indices):
-                    submitted_idx = futures_to_indices[future]
-                    try:
-                        completed_idx, run_result, run_time = future.result()
-                    except Exception as e:
-                        err_msg = str(e)
-                        pickle_hint = ""
-                        if "pickle" in err_msg.lower():
-                            pickle_hint = (
-                                " Ensure experiment kwargs and return values "
-                                "are pickle-serializable."
-                            )
-                        raise RuntimeError(
-                            f"Run {submitted_idx + 1}/{num_runs} failed in "
-                            f"parallel evaluation: {err_msg}.{pickle_hint}"
-                        ) from e
-
-                    ordered_run_results[completed_idx] = run_result
-                    ordered_execution_times[completed_idx] = run_time
-                    run_completed[completed_idx] = True
-
-            for i in range(num_runs):
-                if not run_completed[i]:
-                    raise RuntimeError(
-                        f"Run {i + 1}/{num_runs} did not complete in parallel mode."
-                    )
-
-                run_result = ordered_run_results[i]
-                run_time = ordered_execution_times[i]
+            for run_result, run_time in zip(parallel_results, parallel_times):
                 all_run_results.append(run_result)
                 execution_times.append(run_time)
 
@@ -307,11 +378,6 @@ def run_shinka_eval(
                                 all_validation_errors_list.append(validation_err_msg)
                     else:
                         num_valid_runs += 1
-
-                print(
-                    f"{10 * '='}Run {i + 1}/{num_runs} completed in "
-                    f"{run_time:.2f} seconds{10 * '='}"
-                )
         else:
             for i in range(num_runs):
                 print(

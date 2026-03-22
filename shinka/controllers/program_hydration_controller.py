@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence
+from typing import Any, Dict, Optional, Sequence
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from shinka.database.connection import DatabaseConnection
 from shinka.database.program import Program
 from shinka.database.models import (
     ProgramEmbeddingProjectionRecord,
@@ -16,17 +17,14 @@ from shinka.database.models import (
 
 from .inspiration_controller import InspirationController
 
-if TYPE_CHECKING:
-    from .database_controller import DatabaseController
-
 
 class ProgramHydrationController:
     """Builds domain `Program` objects and summaries from ORM records."""
 
-    def __init__(self, database: "DatabaseController") -> None:
-        self.database = database
-        self._session_factory = database.SessionLocal
-        self.inspirations = InspirationController(database)
+    def __init__(self, connection: DatabaseConnection) -> None:
+        self.connection = connection
+        self._session_factory = connection.SessionLocal
+        self.inspirations = InspirationController(connection)
 
     def _session(self) -> Session:
         return self._session_factory()

@@ -4,21 +4,19 @@ import logging
 import math
 import uuid
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Callable, List, Optional
+from typing import Any, Callable, List, Optional
 
 import numpy as np
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from shinka.database.connection import DatabaseConnection
 from shinka.database.models import (
     ProgramEmbeddingProjectionRecord,
     ProgramEmbeddingRecord,
     ProgramRecord,
 )
 from shinka.embed import EmbeddingClient
-
-if TYPE_CHECKING:
-    from .database_controller import DatabaseController
 
 
 logger = logging.getLogger(__name__)
@@ -47,13 +45,13 @@ class EmbeddingController:
 
     def __init__(
         self,
-        database: "DatabaseController",
+        connection: DatabaseConnection,
         *,
         embedding_client_factory: Callable[[], Optional[EmbeddingClient]] | None = None,
     ) -> None:
-        self.database = database
-        self._session_factory = database.SessionLocal
-        self.read_only = database.read_only
+        self.connection = connection
+        self._session_factory = connection.SessionLocal
+        self.read_only = connection.read_only
         self.embedding_client_factory = embedding_client_factory
 
     @contextmanager

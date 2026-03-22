@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from shinka.database.connection import DatabaseConnection
 from shinka.database.models import ProgramEvaluationRecord, ProgramRecord
 from shinka.database.program import Program
 
@@ -12,18 +13,15 @@ from .island_controller import IslandController
 from .program_hydration_controller import ProgramHydrationController
 from .types import Island, ProgramCountSnapshot
 
-if TYPE_CHECKING:
-    from .database_controller import DatabaseController
-
 
 class ProgramQueryController:
     """Read/query layer for programs and computed program views."""
 
-    def __init__(self, database: "DatabaseController") -> None:
-        self.database = database
-        self._session_factory = database.SessionLocal
-        self.hydration = ProgramHydrationController(database)
-        self.islands = IslandController(database)
+    def __init__(self, connection: DatabaseConnection) -> None:
+        self.connection = connection
+        self._session_factory = connection.SessionLocal
+        self.hydration = ProgramHydrationController(connection)
+        self.islands = IslandController(connection)
 
     def _session(self) -> Session:
         return self._session_factory()

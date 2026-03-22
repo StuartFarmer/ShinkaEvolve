@@ -156,9 +156,9 @@ This is the write-side replacement for `ProgramDatabase.add(...)`.
 
 Internally it should depend on:
 
-- `ProgramRepository`
-- `MetadataRepository`
-- `CombinedIslandManager` or later `IslandService`
+- `ProgramController`
+- `RunStateController`
+- `IslandController`
 - optional embedding/clustering service
 
 Exit criteria:
@@ -247,7 +247,7 @@ What to replace:
 - `self.db.add(...)` -> `self.program_ingestor.ingest(...)`
 - `self.db.get_best_program(...)` -> `self.programs.get_best(...)`
 - `self.db.last_iteration` / `self.db.best_program_id` -> metadata snapshot / repository
-- `self.db.island_manager...` -> injected island service
+- `self.db.island_manager...` -> injected island controller/service
 
 Exit criteria:
 
@@ -319,7 +319,7 @@ Owns:
 - migration
 - spawning
 
-This can be the cleaned-up successor to `CombinedIslandManager`.
+This is now the island-focused controller/service layer rather than a standalone manager object.
 
 ### AsyncProgramStore
 

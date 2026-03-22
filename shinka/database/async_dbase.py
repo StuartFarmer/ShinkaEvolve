@@ -666,7 +666,7 @@ class AsyncProgramDatabase:
         controller: DatabaseController,
     ) -> EmbeddingController:
         return EmbeddingController(
-            controller,
+            controller.connection,
             embedding_client_factory=self.ensure_embedding_client,
         )
 

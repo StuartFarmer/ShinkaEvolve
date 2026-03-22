@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from shinka.database.connector import DatabaseConnector
+from shinka.database.connection import DatabaseConnection
 from shinka.database.models import Base
 
 from .embedding_controller import EmbeddingController
@@ -23,29 +23,29 @@ class DatabaseController:
         read_only: bool = False,
     ) -> "DatabaseController":
         return cls(
-            DatabaseConnector.open(
+            DatabaseConnection.open(
                 db_path=db_path,
                 num_islands=num_islands,
                 read_only=read_only,
             )
         )
 
-    def __init__(self, connector: DatabaseConnector) -> None:
-        self.connector = connector
-        self.db_path = connector.db_path
-        self.num_islands = connector.num_islands
-        self.read_only = connector.read_only
-        self.conn = connector.conn
-        self.cursor = connector.cursor
-        self.engine = connector.engine
-        self.SessionLocal = connector.SessionLocal
+    def __init__(self, connection: DatabaseConnection) -> None:
+        self.connection = connection
+        self.db_path = connection.db_path
+        self.num_islands = connection.num_islands
+        self.read_only = connection.read_only
+        self.conn = connection.conn
+        self.cursor = connection.cursor
+        self.engine = connection.engine
+        self.SessionLocal = connection.SessionLocal
         self._bootstrap()
-        self.programs = ProgramController(self)
-        self.metadata = MetadataController(self)
-        self.inspirations = InspirationController(self)
-        self.embeddings = EmbeddingController(self)
-        self.islands = IslandController(self)
-        self.run_state = RunStateController(self)
+        self.programs = ProgramController(connection)
+        self.metadata = MetadataController(connection)
+        self.inspirations = InspirationController(connection)
+        self.embeddings = EmbeddingController(connection)
+        self.islands = IslandController(connection)
+        self.run_state = RunStateController(connection)
         if not self.read_only:
             self.run_state.load_snapshot()
 
@@ -63,4 +63,4 @@ class DatabaseController:
         self.conn.commit()
 
     def close(self) -> None:
-        self.connector.close()
+        self.connection.close()

@@ -30,7 +30,7 @@ def test_metadata_controller_loads_and_persists_generic_metadata():
         )
         db = controller.programs
         try:
-            metadata = MetadataController(controller)
+            metadata = MetadataController(controller.connection)
             metadata.set("custom_key", "custom_value")
             assert metadata.get("custom_key") == "custom_value"
         finally:
@@ -49,7 +49,7 @@ def test_run_state_controller_loads_and_persists_typed_run_state():
         try:
             db.add(_program("prog-1", generation=0, island_idx=0))
             db.add(_program("prog-2", generation=1, island_idx=1))
-            run_state = RunStateController(controller)
+            run_state = RunStateController(controller.connection)
             run_state.set("best_program_id", "prog-1")
             run_state.set("beam_search_parent_id", "prog-2")
             run_state.set("best_score_generation", "7")

@@ -2,25 +2,23 @@ from __future__ import annotations
 
 import uuid
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
+from shinka.database.connection import DatabaseConnection
 from shinka.database.models import ProgramInspirationRecord
 from .types import InspirationUse
-
-if TYPE_CHECKING:
-    from .database_controller import DatabaseController
 
 
 class InspirationController:
     """Controller for normalized program inspiration edges."""
 
-    def __init__(self, database: "DatabaseController") -> None:
-        self.database = database
-        self._session_factory = database.SessionLocal
-        self.read_only = database.read_only
+    def __init__(self, connection: DatabaseConnection) -> None:
+        self.connection = connection
+        self._session_factory = connection.SessionLocal
+        self.read_only = connection.read_only
 
     @contextmanager
     def _managed_session(self, session: Session | None = None):

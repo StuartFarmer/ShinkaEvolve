@@ -3,17 +3,15 @@ from __future__ import annotations
 from contextlib import contextmanager
 import logging
 import random
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
+from shinka.database.connection import DatabaseConnection
 from shinka.database.models import ProgramEvaluationRecord, ProgramRecord
 from shinka.database.program import Program
 from .types import Island
-
-if TYPE_CHECKING:
-    from .database_controller import DatabaseController
 
 logger = logging.getLogger(__name__)
 
@@ -21,10 +19,10 @@ logger = logging.getLogger(__name__)
 class IslandController:
     """Island-scoped computed view/controller over persisted programs."""
 
-    def __init__(self, database: "DatabaseController") -> None:
-        self.database = database
-        self._session_factory = database.SessionLocal
-        self.num_islands = database.num_islands
+    def __init__(self, connection: DatabaseConnection) -> None:
+        self.connection = connection
+        self._session_factory = connection.SessionLocal
+        self.num_islands = connection.num_islands
 
     @contextmanager
     def _managed_session(self, session: Session | None = None):

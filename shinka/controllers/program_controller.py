@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from shinka.database.connection import DatabaseConnection
 
 from .embedding_controller import EmbeddingController
 from .inspiration_controller import InspirationController
@@ -9,26 +9,23 @@ from .program_mutation_controller import ProgramMutationController
 from .program_query_controller import ProgramQueryController
 from .run_state_controller import RunStateController
 
-if TYPE_CHECKING:
-    from .database_controller import DatabaseController
-
 
 class ProgramController:
     """Public CRUD/query controller facade for programs."""
 
-    def __init__(self, database: "DatabaseController") -> None:
-        self.database = database
-        self.num_islands = database.num_islands
-        self.run_state = RunStateController(database)
-        self.metadata = MetadataController(database)
-        self.inspirations = InspirationController(database)
-        self.embeddings = EmbeddingController(database)
+    def __init__(self, connection: DatabaseConnection) -> None:
+        self.connection = connection
+        self.num_islands = connection.num_islands
+        self.run_state = RunStateController(connection)
+        self.metadata = MetadataController(connection)
+        self.inspirations = InspirationController(connection)
+        self.embeddings = EmbeddingController(connection)
         self.run_state_controller = self.run_state
         self.metadata_controller = self.metadata
         self.inspiration_controller = self.inspirations
         self.embedding_controller = self.embeddings
-        self.query = ProgramQueryController(database)
-        self.mutations = ProgramMutationController(database)
+        self.query = ProgramQueryController(connection)
+        self.mutations = ProgramMutationController(connection)
         snapshot = self.run_state.load_snapshot()
         self.last_iteration = snapshot.last_iteration
         self.best_program_id = snapshot.best_program_id
@@ -95,7 +92,7 @@ class ProgramController:
         )
 
     def close(self) -> None:
-        self.database.close()
+        self.connection.close()
 
     def __getattr__(self, name):
         if hasattr(self.query, name):

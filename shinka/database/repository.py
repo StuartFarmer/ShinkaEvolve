@@ -32,7 +32,14 @@ from .program import Program
 from .inspiration_repository import InspirationRepository, InspirationUse
 from .island_repository import Island, IslandRepository
 from .metadata_repository import MetadataRepository
-from .models import Base, ProgramRecord
+from .models import (
+    Base,
+    ProgramEmbeddingProjectionRecord,
+    ProgramEmbeddingRecord,
+    ProgramEvaluationRecord,
+    ProgramProposalRecord,
+    ProgramRecord,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -293,19 +300,110 @@ class ProgramRepository:
             )
         return inspirations
 
+    def _build_evaluation_index(
+        self,
+        program_ids: Sequence[str],
+    ) -> Dict[str, ProgramEvaluationRecord]:
+        ids = [program_id for program_id in program_ids if program_id]
+        if not ids:
+            return {}
+        with self._session() as session:
+            records = session.execute(
+                select(ProgramEvaluationRecord).where(
+                    ProgramEvaluationRecord.program_id.in_(ids)
+                )
+            ).scalars().all()
+        return {record.program_id: record for record in records}
+
+    def _build_proposal_index(
+        self,
+        program_ids: Sequence[str],
+    ) -> Dict[str, ProgramProposalRecord]:
+        ids = [program_id for program_id in program_ids if program_id]
+        if not ids:
+            return {}
+        with self._session() as session:
+            records = session.execute(
+                select(ProgramProposalRecord).where(
+                    ProgramProposalRecord.program_id.in_(ids)
+                )
+            ).scalars().all()
+        return {record.program_id: record for record in records}
+
+    def _build_embedding_index(
+        self,
+        program_ids: Sequence[str],
+    ) -> Dict[str, ProgramEmbeddingRecord]:
+        ids = [program_id for program_id in program_ids if program_id]
+        if not ids:
+            return {}
+        with self._session() as session:
+            records = session.execute(
+                select(ProgramEmbeddingRecord).where(
+                    ProgramEmbeddingRecord.program_id.in_(ids)
+                )
+            ).scalars().all()
+        return {record.program_id: record for record in records}
+
+    def _build_projection_index(
+        self,
+        program_ids: Sequence[str],
+    ) -> Dict[str, Dict[str, ProgramEmbeddingProjectionRecord]]:
+        ids = [program_id for program_id in program_ids if program_id]
+        if not ids:
+            return {}
+        with self._session() as session:
+            records = session.execute(
+                select(ProgramEmbeddingProjectionRecord).where(
+                    ProgramEmbeddingProjectionRecord.program_id.in_(ids)
+                )
+            ).scalars().all()
+        index: Dict[str, Dict[str, ProgramEmbeddingProjectionRecord]] = {
+            program_id: {} for program_id in ids
+        }
+        for record in records:
+            index.setdefault(record.program_id, {})[record.kind] = record
+        return index
+
     def _record_to_program(
         self,
         record: ProgramRecord | None,
         *,
         inspiration_index: Optional[Dict[str, Dict[str, List[str]]]] = None,
+        evaluation_index: Optional[Dict[str, ProgramEvaluationRecord]] = None,
+        proposal_index: Optional[Dict[str, ProgramProposalRecord]] = None,
+        embedding_index: Optional[Dict[str, ProgramEmbeddingRecord]] = None,
+        projection_index: Optional[Dict[str, Dict[str, ProgramEmbeddingProjectionRecord]]] = None,
     ) -> Optional[Program]:
         if record is None:
             return None
+        if evaluation_index is None:
+            evaluation_index = self._build_evaluation_index([record.id])
+        if proposal_index is None:
+            proposal_index = self._build_proposal_index([record.id])
+        if embedding_index is None:
+            embedding_index = self._build_embedding_index([record.id])
+        if projection_index is None:
+            projection_index = self._build_projection_index([record.id])
         inspiration_lists = (
             inspiration_index.get(record.id, {})
             if inspiration_index is not None
             else self._build_inspiration_index([record.id]).get(record.id, {})
         )
+        evaluation = evaluation_index.get(record.id)
+        proposal = proposal_index.get(record.id)
+        embedding = embedding_index.get(record.id)
+        projections = projection_index.get(record.id, {})
+        projection_2d = projections.get("pca_2d")
+        projection_3d = projections.get("pca_3d")
+        diagnostics = (
+            dict(evaluation.diagnostics_json or {})
+            if evaluation is not None
+            else {}
+        )
+        metadata = dict(record.program_metadata or {})
+        if diagnostics.get("code_analysis_metrics") and "code_analysis_metrics" not in metadata:
+            metadata["code_analysis_metrics"] = diagnostics["code_analysis_metrics"]
         return Program.from_dict(
             {
                 "id": record.id,
@@ -316,19 +414,23 @@ class ProgramRepository:
                 "top_k_inspiration_ids": inspiration_lists.get("top_k", []),
                 "generation": record.generation,
                 "timestamp": record.timestamp,
-                "code_diff": record.code_diff,
-                "combined_score": record.combined_score,
-                "public_metrics": record.public_metrics or {},
-                "private_metrics": record.private_metrics or {},
-                "text_feedback": record.text_feedback or "",
-                "complexity": record.complexity,
-                "embedding": record.embedding or [],
-                "embedding_pca_2d": record.embedding_pca_2d or [],
-                "embedding_pca_3d": record.embedding_pca_3d or [],
-                "embedding_cluster_id": record.embedding_cluster_id,
-                "correct": bool(record.correct),
+                "code_diff": proposal.code_diff if proposal is not None else None,
+                "combined_score": evaluation.combined_score if evaluation is not None else 0.0,
+                "public_metrics": evaluation.public_metrics_json if evaluation is not None else {},
+                "private_metrics": evaluation.private_metrics_json if evaluation is not None else {},
+                "text_feedback": evaluation.text_feedback if evaluation is not None else "",
+                "complexity": evaluation.complexity if evaluation is not None else 0.0,
+                "embedding": embedding.vector_json if embedding is not None else [],
+                "embedding_pca_2d": projection_2d.coords_json if projection_2d is not None else [],
+                "embedding_pca_3d": projection_3d.coords_json if projection_3d is not None else [],
+                "embedding_cluster_id": (
+                    projection_3d.cluster_id
+                    if projection_3d is not None and projection_3d.cluster_id is not None
+                    else (projection_2d.cluster_id if projection_2d is not None else None)
+                ),
+                "correct": bool(evaluation.correct) if evaluation is not None else False,
                 "children_count": record.children_count,
-                "metadata": record.program_metadata or {},
+                "metadata": metadata,
                 "island_idx": record.island_idx,
                 "migration_history": record.migration_history or [],
                 "system_prompt_id": record.system_prompt_id,
@@ -340,29 +442,56 @@ class ProgramRepository:
         record: ProgramRecord,
         *,
         inspiration_index: Optional[Dict[str, Dict[str, List[str]]]] = None,
+        evaluation_index: Optional[Dict[str, ProgramEvaluationRecord]] = None,
+        proposal_index: Optional[Dict[str, ProgramProposalRecord]] = None,
+        projection_index: Optional[Dict[str, Dict[str, ProgramEmbeddingProjectionRecord]]] = None,
     ) -> dict[str, Any]:
+        if evaluation_index is None:
+            evaluation_index = self._build_evaluation_index([record.id])
+        if proposal_index is None:
+            proposal_index = self._build_proposal_index([record.id])
+        if projection_index is None:
+            projection_index = self._build_projection_index([record.id])
         inspiration_lists = (
             inspiration_index.get(record.id, {})
             if inspiration_index is not None
             else self._build_inspiration_index([record.id]).get(record.id, {})
         )
+        evaluation = evaluation_index.get(record.id)
+        proposal = proposal_index.get(record.id)
+        projections = projection_index.get(record.id, {})
+        projection_2d = projections.get("pca_2d")
+        projection_3d = projections.get("pca_3d")
+        diagnostics = (
+            dict(evaluation.diagnostics_json or {})
+            if evaluation is not None
+            else {}
+        )
+        metadata = dict(record.program_metadata or {})
+        if diagnostics.get("code_analysis_metrics") and "code_analysis_metrics" not in metadata:
+            metadata["code_analysis_metrics"] = diagnostics["code_analysis_metrics"]
         return {
             "id": record.id,
             "parent_id": record.parent_id,
             "generation": record.generation,
             "timestamp": record.timestamp,
-            "combined_score": record.combined_score,
-            "correct": bool(record.correct),
-            "complexity": record.complexity,
+            "combined_score": evaluation.combined_score if evaluation is not None else None,
+            "correct": bool(evaluation.correct) if evaluation is not None else False,
+            "complexity": evaluation.complexity if evaluation is not None else 0.0,
             "island_idx": record.island_idx,
             "children_count": record.children_count,
-            "public_metrics": record.public_metrics or {},
-            "private_metrics": record.private_metrics or {},
-            "metadata": record.program_metadata or {},
-            "embedding_pca_2d": record.embedding_pca_2d or [],
-            "embedding_pca_3d": record.embedding_pca_3d or [],
-            "embedding_cluster_id": record.embedding_cluster_id,
+            "public_metrics": evaluation.public_metrics_json if evaluation is not None else {},
+            "private_metrics": evaluation.private_metrics_json if evaluation is not None else {},
+            "metadata": metadata,
+            "embedding_pca_2d": projection_2d.coords_json if projection_2d is not None else [],
+            "embedding_pca_3d": projection_3d.coords_json if projection_3d is not None else [],
+            "embedding_cluster_id": (
+                projection_3d.cluster_id
+                if projection_3d is not None and projection_3d.cluster_id is not None
+                else (projection_2d.cluster_id if projection_2d is not None else None)
+            ),
             "language": record.language,
+            "code_diff": proposal.code_diff if proposal is not None else None,
             "top_k_inspiration_ids": inspiration_lists.get("top_k", []),
             "archive_inspiration_ids": inspiration_lists.get("archive", []),
             "migration_history": record.migration_history or [],
@@ -377,11 +506,17 @@ class ProgramRepository:
         generation: Optional[int] = None,
         parent_id: Optional[str] = None,
     ):
-        query = select(ProgramRecord)
+        query = select(ProgramRecord).outerjoin(
+            ProgramEvaluationRecord,
+            ProgramEvaluationRecord.program_id == ProgramRecord.id,
+        )
         if correct_only is True:
-            query = query.where(ProgramRecord.correct.is_(True))
+            query = query.where(ProgramEvaluationRecord.correct.is_(True))
         elif correct_only is False:
-            query = query.where(ProgramRecord.correct.is_(False))
+            query = query.where(
+                (ProgramEvaluationRecord.correct.is_(False))
+                | (ProgramEvaluationRecord.correct.is_(None))
+            )
         if island_idx is not None:
             query = query.where(ProgramRecord.island_idx == island_idx)
         if generation is not None:
@@ -393,13 +528,23 @@ class ProgramRepository:
     def _list_programs(self, query) -> List[Program]:
         with self._session() as session:
             records = session.execute(query).scalars().all()
-        inspiration_index = self._build_inspiration_index(
-            [record.id for record in records]
-        )
+        program_ids = [record.id for record in records]
+        inspiration_index = self._build_inspiration_index(program_ids)
+        evaluation_index = self._build_evaluation_index(program_ids)
+        proposal_index = self._build_proposal_index(program_ids)
+        embedding_index = self._build_embedding_index(program_ids)
+        projection_index = self._build_projection_index(program_ids)
         return [
             p
             for p in (
-                self._record_to_program(record, inspiration_index=inspiration_index)
+                self._record_to_program(
+                    record,
+                    inspiration_index=inspiration_index,
+                    evaluation_index=evaluation_index,
+                    proposal_index=proposal_index,
+                    embedding_index=embedding_index,
+                    projection_index=projection_index,
+                )
                 for record in records
             )
             if p is not None
@@ -431,22 +576,12 @@ class ProgramRepository:
             session.add(
                 ProgramRecord(
                     id=program.id,
+                    name=getattr(program, "name", None),
                     code=program.code,
                     language=program.language,
                     parent_id=program.parent_id,
                     generation=program.generation,
                     timestamp=program.timestamp,
-                    code_diff=program.code_diff,
-                    combined_score=program.combined_score,
-                    public_metrics=_clean_nan_values(program.public_metrics or {}),
-                    private_metrics=_clean_nan_values(program.private_metrics or {}),
-                    text_feedback=_normalize_text_feedback(program.text_feedback),
-                    complexity=program.complexity,
-                    embedding=_clean_nan_values(program.embedding or []),
-                    embedding_pca_2d=_clean_nan_values(program.embedding_pca_2d or []),
-                    embedding_pca_3d=_clean_nan_values(program.embedding_pca_3d or []),
-                    embedding_cluster_id=program.embedding_cluster_id,
-                    correct=bool(program.correct),
                     children_count=program.children_count,
                     program_metadata=_clean_nan_values(program.metadata or {}),
                     island_idx=program.island_idx,
@@ -454,6 +589,86 @@ class ProgramRepository:
                     system_prompt_id=program.system_prompt_id,
                 )
             )
+            session.flush()
+            diagnostics = {}
+            if program.metadata and program.metadata.get("code_analysis_metrics"):
+                diagnostics["code_analysis_metrics"] = _clean_nan_values(
+                    program.metadata.get("code_analysis_metrics")
+                )
+            session.add(
+                ProgramEvaluationRecord(
+                    id=str(uuid.uuid4()),
+                    program_id=program.id,
+                    correct=bool(program.correct),
+                    combined_score=program.combined_score,
+                    text_feedback=_normalize_text_feedback(program.text_feedback),
+                    complexity=program.complexity,
+                    compute_time_seconds=(
+                        float((program.metadata or {}).get("compute_time"))
+                        if (program.metadata or {}).get("compute_time") is not None
+                        else None
+                    ),
+                    public_metrics_json=_clean_nan_values(program.public_metrics or {}),
+                    private_metrics_json=_clean_nan_values(program.private_metrics or {}),
+                    diagnostics_json=_clean_nan_values(diagnostics),
+                )
+            )
+            session.add(
+                ProgramProposalRecord(
+                    id=str(uuid.uuid4()),
+                    program_id=program.id,
+                    patch_type=(program.metadata or {}).get("patch_type"),
+                    patch_name=(program.metadata or {}).get("patch_name"),
+                    code_diff=program.code_diff,
+                    system_prompt_id=program.system_prompt_id,
+                    proposal_metadata_json=_clean_nan_values(
+                        {
+                            key: value
+                            for key, value in (program.metadata or {}).items()
+                            if key
+                            not in {
+                                "code_analysis_metrics",
+                                "compute_time",
+                            }
+                        }
+                    ),
+                )
+            )
+            if program.embedding:
+                embedding_id = str(uuid.uuid4())
+                session.add(
+                    ProgramEmbeddingRecord(
+                        id=embedding_id,
+                        program_id=program.id,
+                        vector_json=_clean_nan_values(program.embedding or []),
+                        model_name=(program.metadata or {}).get("embedding_model"),
+                        embedding_metadata_json={},
+                    )
+                )
+                if program.embedding_pca_2d:
+                    session.add(
+                        ProgramEmbeddingProjectionRecord(
+                            id=str(uuid.uuid4()),
+                            program_id=program.id,
+                            embedding_id=embedding_id,
+                            kind="pca_2d",
+                            coords_json=_clean_nan_values(program.embedding_pca_2d or []),
+                            cluster_id=program.embedding_cluster_id,
+                            projection_metadata_json={},
+                        )
+                    )
+                if program.embedding_pca_3d:
+                    session.add(
+                        ProgramEmbeddingProjectionRecord(
+                            id=str(uuid.uuid4()),
+                            program_id=program.id,
+                            embedding_id=embedding_id,
+                            kind="pca_3d",
+                            coords_json=_clean_nan_values(program.embedding_pca_3d or []),
+                            cluster_id=program.embedding_cluster_id,
+                            projection_metadata_json={},
+                        )
+                    )
             if program.parent_id:
                 session.execute(
                     update(ProgramRecord)
@@ -562,11 +777,20 @@ class ProgramRepository:
                 select(ProgramRecord).where(ProgramRecord.id.in_(program_ids))
             ).scalars()
             )
-        inspiration_index = self._build_inspiration_index([record.id for record in records])
+        record_ids = [record.id for record in records]
+        inspiration_index = self._build_inspiration_index(record_ids)
+        evaluation_index = self._build_evaluation_index(record_ids)
+        proposal_index = self._build_proposal_index(record_ids)
+        embedding_index = self._build_embedding_index(record_ids)
+        projection_index = self._build_projection_index(record_ids)
         by_id = {
             record.id: self._record_to_program(
                 record,
                 inspiration_index=inspiration_index,
+                evaluation_index=evaluation_index,
+                proposal_index=proposal_index,
+                embedding_index=embedding_index,
+                projection_index=projection_index,
             )
             for record in records
         }
@@ -620,18 +844,28 @@ class ProgramRepository:
         with self._session() as session:
             base = (
                 select(ProgramRecord.id)
+                .join(
+                    ProgramEvaluationRecord,
+                    ProgramEvaluationRecord.program_id == ProgramRecord.id,
+                )
                 .where(
                     ProgramRecord.island_idx == source_idx,
                     ProgramRecord.generation > 0,
-                    ProgramRecord.correct.is_(True),
+                    ProgramEvaluationRecord.correct.is_(True),
                 )
             )
             available = int(
                 session.scalar(
-                    select(func.count()).select_from(ProgramRecord).where(
+                    select(func.count())
+                    .select_from(ProgramRecord)
+                    .join(
+                        ProgramEvaluationRecord,
+                        ProgramEvaluationRecord.program_id == ProgramRecord.id,
+                    )
+                    .where(
                         ProgramRecord.island_idx == source_idx,
                         ProgramRecord.generation > 0,
-                        ProgramRecord.correct.is_(True),
+                        ProgramEvaluationRecord.correct.is_(True),
                     )
                 )
                 or 0
@@ -640,7 +874,7 @@ class ProgramRepository:
                 return []
             if island_elitism:
                 elite_id = session.scalar(
-                    base.order_by(ProgramRecord.combined_score.desc()).limit(1)
+                    base.order_by(ProgramEvaluationRecord.combined_score.desc()).limit(1)
                 )
                 if elite_id:
                     base = base.where(ProgramRecord.id != elite_id)
@@ -685,11 +919,24 @@ class ProgramRepository:
             if record is None:
                 return None
             return {
-                "score": record.combined_score,
+                "score": (
+                    session.scalar(
+                        select(ProgramEvaluationRecord.combined_score).where(
+                            ProgramEvaluationRecord.program_id == program_id
+                        )
+                    )
+                ),
                 "children_count": record.children_count,
                 "generation": record.generation,
                 "metadata": record.program_metadata or {},
-                "complexity": record.complexity,
+                "complexity": (
+                    session.scalar(
+                        select(ProgramEvaluationRecord.complexity).where(
+                            ProgramEvaluationRecord.program_id == program_id
+                        )
+                    )
+                    or 0.0
+                ),
             }
 
     def insert_program_copy_from_object(
@@ -711,22 +958,12 @@ class ProgramRepository:
             session.add(
                 ProgramRecord(
                     id=new_id,
+                    name=getattr(program, "name", None),
                     code=program.code,
                     language=program.language,
                     parent_id=program.parent_id,
                     generation=program.generation,
                     timestamp=program.timestamp,
-                    code_diff=program.code_diff,
-                    combined_score=program.combined_score,
-                    public_metrics=_clean_nan_values(program.public_metrics or {}),
-                    private_metrics=_clean_nan_values(program.private_metrics or {}),
-                    text_feedback=_normalize_text_feedback(program.text_feedback),
-                    complexity=program.complexity,
-                    embedding=_clean_nan_values(program.embedding or []),
-                    embedding_pca_2d=_clean_nan_values(program.embedding_pca_2d or []),
-                    embedding_pca_3d=_clean_nan_values(program.embedding_pca_3d or []),
-                    embedding_cluster_id=program.embedding_cluster_id,
-                    correct=bool(program.correct),
                     children_count=program.children_count,
                     program_metadata=_clean_nan_values(metadata),
                     island_idx=island_idx,
@@ -734,6 +971,82 @@ class ProgramRepository:
                     system_prompt_id=program.system_prompt_id,
                 )
             )
+            session.flush()
+            diagnostics = {}
+            if program.metadata and program.metadata.get("code_analysis_metrics"):
+                diagnostics["code_analysis_metrics"] = _clean_nan_values(
+                    program.metadata.get("code_analysis_metrics")
+                )
+            session.add(
+                ProgramEvaluationRecord(
+                    id=str(uuid.uuid4()),
+                    program_id=new_id,
+                    correct=bool(program.correct),
+                    combined_score=program.combined_score,
+                    text_feedback=_normalize_text_feedback(program.text_feedback),
+                    complexity=program.complexity,
+                    compute_time_seconds=(
+                        float((program.metadata or {}).get("compute_time"))
+                        if (program.metadata or {}).get("compute_time") is not None
+                        else None
+                    ),
+                    public_metrics_json=_clean_nan_values(program.public_metrics or {}),
+                    private_metrics_json=_clean_nan_values(program.private_metrics or {}),
+                    diagnostics_json=_clean_nan_values(diagnostics),
+                )
+            )
+            session.add(
+                ProgramProposalRecord(
+                    id=str(uuid.uuid4()),
+                    program_id=new_id,
+                    patch_type=(program.metadata or {}).get("patch_type"),
+                    patch_name=(program.metadata or {}).get("patch_name"),
+                    code_diff=program.code_diff,
+                    system_prompt_id=program.system_prompt_id,
+                    proposal_metadata_json=_clean_nan_values(
+                        {
+                            key: value
+                            for key, value in (program.metadata or {}).items()
+                            if key not in {"code_analysis_metrics", "compute_time"}
+                        }
+                    ),
+                )
+            )
+            if program.embedding:
+                embedding_id = str(uuid.uuid4())
+                session.add(
+                    ProgramEmbeddingRecord(
+                        id=embedding_id,
+                        program_id=new_id,
+                        vector_json=_clean_nan_values(program.embedding or []),
+                        model_name=(program.metadata or {}).get("embedding_model"),
+                        embedding_metadata_json={},
+                    )
+                )
+                if program.embedding_pca_2d:
+                    session.add(
+                        ProgramEmbeddingProjectionRecord(
+                            id=str(uuid.uuid4()),
+                            program_id=new_id,
+                            embedding_id=embedding_id,
+                            kind="pca_2d",
+                            coords_json=_clean_nan_values(program.embedding_pca_2d or []),
+                            cluster_id=program.embedding_cluster_id,
+                            projection_metadata_json={},
+                        )
+                    )
+                if program.embedding_pca_3d:
+                    session.add(
+                        ProgramEmbeddingProjectionRecord(
+                            id=str(uuid.uuid4()),
+                            program_id=new_id,
+                            embedding_id=embedding_id,
+                            kind="pca_3d",
+                            coords_json=_clean_nan_values(program.embedding_pca_3d or []),
+                            cluster_id=program.embedding_cluster_id,
+                            projection_metadata_json={},
+                        )
+                    )
             if self.inspiration_repo is None:
                 raise ConnectionError("Repository inspiration store not initialized.")
             self.inspiration_repo.replace_for_child(
@@ -778,22 +1091,12 @@ class ProgramRepository:
             session.add(
                 ProgramRecord(
                     id=new_id,
+                    name=source_program.get("name"),
                     code=source_program["code"],
                     language=source_program["language"],
                     parent_id=new_parent_id,
                     generation=source_program.get("generation", 0),
                     timestamp=time.time(),
-                    code_diff=None,
-                    combined_score=source_program.get("combined_score"),
-                    public_metrics=_clean_nan_values(source_program.get("public_metrics") or {}),
-                    private_metrics=_clean_nan_values(source_program.get("private_metrics") or {}),
-                    text_feedback=_normalize_text_feedback(source_program.get("text_feedback")),
-                    complexity=float(source_program.get("complexity") or 0.0),
-                    embedding=_clean_nan_values(source_program.get("embedding") or []),
-                    embedding_pca_2d=_clean_nan_values(source_program.get("embedding_pca_2d") or []),
-                    embedding_pca_3d=_clean_nan_values(source_program.get("embedding_pca_3d") or []),
-                    embedding_cluster_id=source_program.get("embedding_cluster_id"),
-                    correct=bool(source_program.get("correct", 0)),
                     children_count=0,
                     program_metadata=_clean_nan_values(metadata),
                     island_idx=new_island_idx,
@@ -801,6 +1104,83 @@ class ProgramRepository:
                     system_prompt_id=source_program.get("system_prompt_id"),
                 )
             )
+            session.flush()
+            diagnostics = {}
+            if metadata.get("code_analysis_metrics"):
+                diagnostics["code_analysis_metrics"] = _clean_nan_values(
+                    metadata.get("code_analysis_metrics")
+                )
+            session.add(
+                ProgramEvaluationRecord(
+                    id=str(uuid.uuid4()),
+                    program_id=new_id,
+                    correct=bool(source_program.get("correct", 0)),
+                    combined_score=source_program.get("combined_score"),
+                    text_feedback=_normalize_text_feedback(source_program.get("text_feedback")),
+                    complexity=float(source_program.get("complexity") or 0.0),
+                    compute_time_seconds=(
+                        float(metadata.get("compute_time"))
+                        if metadata.get("compute_time") is not None
+                        else None
+                    ),
+                    public_metrics_json=_clean_nan_values(source_program.get("public_metrics") or {}),
+                    private_metrics_json=_clean_nan_values(source_program.get("private_metrics") or {}),
+                    diagnostics_json=_clean_nan_values(diagnostics),
+                )
+            )
+            session.add(
+                ProgramProposalRecord(
+                    id=str(uuid.uuid4()),
+                    program_id=new_id,
+                    patch_type=metadata.get("patch_type"),
+                    patch_name=metadata.get("patch_name"),
+                    code_diff=source_program.get("code_diff"),
+                    system_prompt_id=source_program.get("system_prompt_id"),
+                    proposal_metadata_json=_clean_nan_values(
+                        {
+                            key: value
+                            for key, value in metadata.items()
+                            if key not in {"code_analysis_metrics", "compute_time"}
+                        }
+                    ),
+                )
+            )
+            source_embedding = list(source_program.get("embedding") or [])
+            if source_embedding:
+                embedding_id = str(uuid.uuid4())
+                session.add(
+                    ProgramEmbeddingRecord(
+                        id=embedding_id,
+                        program_id=new_id,
+                        vector_json=_clean_nan_values(source_embedding),
+                        model_name=metadata.get("embedding_model"),
+                        embedding_metadata_json={},
+                    )
+                )
+                if source_program.get("embedding_pca_2d"):
+                    session.add(
+                        ProgramEmbeddingProjectionRecord(
+                            id=str(uuid.uuid4()),
+                            program_id=new_id,
+                            embedding_id=embedding_id,
+                            kind="pca_2d",
+                            coords_json=_clean_nan_values(source_program.get("embedding_pca_2d") or []),
+                            cluster_id=source_program.get("embedding_cluster_id"),
+                            projection_metadata_json={},
+                        )
+                    )
+                if source_program.get("embedding_pca_3d"):
+                    session.add(
+                        ProgramEmbeddingProjectionRecord(
+                            id=str(uuid.uuid4()),
+                            program_id=new_id,
+                            embedding_id=embedding_id,
+                            kind="pca_3d",
+                            coords_json=_clean_nan_values(source_program.get("embedding_pca_3d") or []),
+                            cluster_id=source_program.get("embedding_cluster_id"),
+                            projection_metadata_json={},
+                        )
+                    )
             if new_parent_id:
                 session.execute(
                     update(ProgramRecord)
@@ -846,7 +1226,7 @@ class ProgramRepository:
     ) -> List[dict[str, Any]]:
         query = (
             self._program_query(correct_only=True, parent_id=parent_id)
-            .order_by(ProgramRecord.combined_score.desc())
+            .order_by(ProgramEvaluationRecord.combined_score.desc())
         )
         if limit is not None:
             query = query.limit(limit)
@@ -865,9 +1245,14 @@ class ProgramRepository:
     ) -> List[tuple[str, list[float]]]:
         with self._session() as session:
             rows = session.execute(
-                select(ProgramRecord.id, ProgramRecord.embedding).where(
+                select(
+                    ProgramEmbeddingRecord.program_id,
+                    ProgramEmbeddingRecord.vector_json,
+                )
+                .join(ProgramRecord, ProgramRecord.id == ProgramEmbeddingRecord.program_id)
+                .where(
                     ProgramRecord.island_idx == island_idx,
-                    ProgramRecord.embedding.is_not(None),
+                    ProgramEmbeddingRecord.vector_json.is_not(None),
                 )
             ).all()
         return [
@@ -879,8 +1264,11 @@ class ProgramRepository:
     def list_all_embeddings(self) -> List[tuple[str, list[float]]]:
         with self._session() as session:
             rows = session.execute(
-                select(ProgramRecord.id, ProgramRecord.embedding).where(
-                    ProgramRecord.embedding.is_not(None),
+                select(
+                    ProgramEmbeddingRecord.program_id,
+                    ProgramEmbeddingRecord.vector_json,
+                ).where(
+                    ProgramEmbeddingRecord.vector_json.is_not(None),
                 )
             ).all()
         return [
@@ -900,12 +1288,59 @@ class ProgramRepository:
         if self.read_only:
             raise PermissionError("Cannot update embedding features in read-only mode.")
         with self._session() as session:
-            record = session.get(ProgramRecord, program_id)
-            if record is None:
-                return
-            record.embedding_pca_2d = _clean_nan_values(embedding_pca_2d)
-            record.embedding_pca_3d = _clean_nan_values(embedding_pca_3d)
-            record.embedding_cluster_id = int(embedding_cluster_id)
+            embedding_record = session.scalar(
+                select(ProgramEmbeddingRecord).where(
+                    ProgramEmbeddingRecord.program_id == program_id
+                )
+            )
+            if embedding_record is None:
+                embedding_record = ProgramEmbeddingRecord(
+                    id=str(uuid.uuid4()),
+                    program_id=program_id,
+                    vector_json=[],
+                    model_name=None,
+                    embedding_metadata_json={},
+                )
+                session.add(embedding_record)
+                session.flush()
+            projection_2d = session.scalar(
+                select(ProgramEmbeddingProjectionRecord).where(
+                    ProgramEmbeddingProjectionRecord.program_id == program_id,
+                    ProgramEmbeddingProjectionRecord.kind == "pca_2d",
+                )
+            )
+            if projection_2d is None:
+                projection_2d = ProgramEmbeddingProjectionRecord(
+                    id=str(uuid.uuid4()),
+                    program_id=program_id,
+                    embedding_id=embedding_record.id,
+                    kind="pca_2d",
+                    coords_json=[],
+                    cluster_id=None,
+                    projection_metadata_json={},
+                )
+                session.add(projection_2d)
+            projection_3d = session.scalar(
+                select(ProgramEmbeddingProjectionRecord).where(
+                    ProgramEmbeddingProjectionRecord.program_id == program_id,
+                    ProgramEmbeddingProjectionRecord.kind == "pca_3d",
+                )
+            )
+            if projection_3d is None:
+                projection_3d = ProgramEmbeddingProjectionRecord(
+                    id=str(uuid.uuid4()),
+                    program_id=program_id,
+                    embedding_id=embedding_record.id,
+                    kind="pca_3d",
+                    coords_json=[],
+                    cluster_id=None,
+                    projection_metadata_json={},
+                )
+                session.add(projection_3d)
+            projection_2d.coords_json = _clean_nan_values(embedding_pca_2d)
+            projection_2d.cluster_id = int(embedding_cluster_id)
+            projection_3d.coords_json = _clean_nan_values(embedding_pca_3d)
+            projection_3d.cluster_id = int(embedding_cluster_id)
             session.commit()
 
     def commit(self) -> None:
@@ -1049,9 +1484,13 @@ class ProgramRepository:
         with self._session() as session:
             rows = session.execute(
                 select(ProgramRecord.island_idx, func.count())
+                .join(
+                    ProgramEvaluationRecord,
+                    ProgramEvaluationRecord.program_id == ProgramRecord.id,
+                )
                 .where(
                     ProgramRecord.island_idx.in_(list(island_indices)),
-                    ProgramRecord.correct.is_(True),
+                    ProgramEvaluationRecord.correct.is_(True),
                 )
                 .group_by(ProgramRecord.island_idx)
             ).all()
@@ -1067,10 +1506,17 @@ class ProgramRepository:
             return {}
         with self._session() as session:
             rows = session.execute(
-                select(ProgramRecord.island_idx, func.max(ProgramRecord.combined_score))
+                select(
+                    ProgramRecord.island_idx,
+                    func.max(ProgramEvaluationRecord.combined_score),
+                )
+                .join(
+                    ProgramEvaluationRecord,
+                    ProgramEvaluationRecord.program_id == ProgramRecord.id,
+                )
                 .where(
                     ProgramRecord.island_idx.in_(list(island_indices)),
-                    ProgramRecord.correct.is_(True),
+                    ProgramEvaluationRecord.correct.is_(True),
                 )
                 .group_by(ProgramRecord.island_idx)
             ).all()
@@ -1138,8 +1584,8 @@ class ProgramRepository:
         )
         if metric == "combined_score":
             return self._list_programs(
-                base.where(ProgramRecord.combined_score.is_not(None))
-                .order_by(ProgramRecord.combined_score.desc())
+                base.where(ProgramEvaluationRecord.combined_score.is_not(None))
+                .order_by(ProgramEvaluationRecord.combined_score.desc())
                 .limit(n)
             )
         if metric == "timestamp":
@@ -1168,9 +1614,19 @@ class ProgramRepository:
     def get_summaries(self) -> List[dict[str, Any]]:
         with self._session() as session:
             records = session.execute(select(ProgramRecord)).scalars().all()
-        inspiration_index = self._build_inspiration_index([record.id for record in records])
+        program_ids = [record.id for record in records]
+        inspiration_index = self._build_inspiration_index(program_ids)
+        evaluation_index = self._build_evaluation_index(program_ids)
+        proposal_index = self._build_proposal_index(program_ids)
+        projection_index = self._build_projection_index(program_ids)
         return [
-            self._record_to_summary(record, inspiration_index=inspiration_index)
+            self._record_to_summary(
+                record,
+                inspiration_index=inspiration_index,
+                evaluation_index=evaluation_index,
+                proposal_index=proposal_index,
+                projection_index=projection_index,
+            )
             for record in records
         ]
 

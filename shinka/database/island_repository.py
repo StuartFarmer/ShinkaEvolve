@@ -68,13 +68,14 @@ class IslandRepository:
         self.cursor.execute(
             """
             SELECT
-                island_idx,
+                p.island_idx AS island_idx,
                 COUNT(*) AS total_programs,
-                SUM(CASE WHEN correct = 1 THEN 1 ELSE 0 END) AS correct_programs,
-                MAX(CASE WHEN correct = 1 THEN combined_score ELSE NULL END) AS best_score
-            FROM programs
-            WHERE island_idx IS NOT NULL
-            GROUP BY island_idx
+                SUM(CASE WHEN e.correct = 1 THEN 1 ELSE 0 END) AS correct_programs,
+                MAX(CASE WHEN e.correct = 1 THEN e.combined_score ELSE NULL END) AS best_score
+            FROM programs p
+            LEFT JOIN program_evaluations e ON e.program_id = p.id
+            WHERE p.island_idx IS NOT NULL
+            GROUP BY p.island_idx
             """
         )
         rows_by_island = {int(row["island_idx"]): row for row in self.cursor.fetchall()}
@@ -90,10 +91,11 @@ class IslandRepository:
             if best_score_raw is not None:
                 self.cursor.execute(
                     """
-                    SELECT id
-                    FROM programs
-                    WHERE island_idx = ? AND correct = 1
-                    ORDER BY combined_score DESC, timestamp ASC, id ASC
+                    SELECT p.id
+                    FROM programs p
+                    JOIN program_evaluations e ON e.program_id = p.id
+                    WHERE p.island_idx = ? AND e.correct = 1
+                    ORDER BY e.combined_score DESC, p.timestamp ASC, p.id ASC
                     LIMIT 1
                     """,
                     (island_idx,),
@@ -166,9 +168,11 @@ class IslandRepository:
     def get_best_program_row(self) -> Optional[Dict[str, Any]]:
         self.cursor.execute(
             """
-            SELECT * FROM programs
-            WHERE correct = 1
-            ORDER BY combined_score DESC
+            SELECT p.*
+            FROM programs p
+            JOIN program_evaluations e ON e.program_id = p.id
+            WHERE e.correct = 1
+            ORDER BY e.combined_score DESC
             LIMIT 1
             """
         )

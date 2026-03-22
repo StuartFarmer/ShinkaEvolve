@@ -69,11 +69,15 @@ class RepositoryBundle:
 
     @property
     def metadata(self):
-        return self.programs.metadata_repo
+        return self.controller.metadata
 
     @property
     def islands(self):
-        return self.programs.island_repo
+        return self.controller.islands
+
+    @property
+    def inspirations(self):
+        return self.controller.inspirations
 
     def close(self) -> None:
         self.programs.close()

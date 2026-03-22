@@ -629,8 +629,8 @@ class ShinkaEvolveRunner:
             read_only=False,
         )
         self.program_repository = self.repository_bundle.programs
-        self.metadata_repo = self.repository_bundle.metadata
-        self.island_repo = self.repository_bundle.islands
+        self.metadata_repo = self.repository_bundle.controller.run_state
+        self.island_repo = self.repository_bundle.controller.islands
 
         snapshot = self.metadata_repo.load_snapshot()
         self.runtime_last_iteration = snapshot.last_iteration
@@ -653,7 +653,7 @@ class ShinkaEvolveRunner:
             island_spawn_strategy=self.island_spawn_strategy,
             island_spawn_subtree_size=self.island_spawn_subtree_size,
             program_repository=self.program_repository,
-            island_repository=self.island_repo,
+            island_controller=self.island_repo,
             archive_policy=self.archive_policy,
         )
         self.database_display = DatabaseDisplay(

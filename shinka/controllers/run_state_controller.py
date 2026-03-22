@@ -7,8 +7,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from shinka.database.connector import DatabaseConnector
-from shinka.database.metadata_repository import RunMetadataSnapshot
 from shinka.database.models import RunStateRecord, ProgramRecord
+from .types import RunMetadataSnapshot
 
 
 class RunStateController:

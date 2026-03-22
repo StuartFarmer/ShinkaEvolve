@@ -48,7 +48,7 @@ class RuntimeHarness:
             island_spawn_strategy=island_spawn_strategy,
             island_spawn_subtree_size=1,
             program_repository=self.program_repository,
-            island_repository=self.bundle.islands,
+            island_controller=self.bundle.controller.islands,
             archive_policy=self.archive_policy,
         )
         self.write_service = ProgramWriteService(

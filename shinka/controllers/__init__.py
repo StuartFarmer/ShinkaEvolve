@@ -6,6 +6,9 @@ __all__ = [
     "EmbeddingController",
     "IslandController",
     "RunStateController",
+    "InspirationUse",
+    "Island",
+    "RunMetadataSnapshot",
 ]
 
 
@@ -38,4 +41,12 @@ def __getattr__(name):
         from .run_state_controller import RunStateController
 
         return RunStateController
+    if name in {"InspirationUse", "Island", "RunMetadataSnapshot"}:
+        from .types import InspirationUse, Island, RunMetadataSnapshot
+
+        return {
+            "InspirationUse": InspirationUse,
+            "Island": Island,
+            "RunMetadataSnapshot": RunMetadataSnapshot,
+        }[name]
     raise AttributeError(name)

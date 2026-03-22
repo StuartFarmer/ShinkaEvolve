@@ -122,7 +122,7 @@ def test_program_repository_persists_inspirations_in_join_table(tmp_path):
     assert loaded.archive_inspiration_ids == [source_a.id]
     assert loaded.top_k_inspiration_ids == [source_b.id]
 
-    uses = repo.inspiration_repo.list_for_child(child.id)
+    uses = repo.inspiration_controller.list_for_child(child.id)
     assert uses == [
         InspirationUse(
             child_program_id=child.id,

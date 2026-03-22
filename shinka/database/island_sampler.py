@@ -5,7 +5,7 @@ import random
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, List
 import numpy as np
-from .island_repository import Island
+from shinka.controllers.types import Island
 
 if TYPE_CHECKING:
     from .repository import ProgramRepository

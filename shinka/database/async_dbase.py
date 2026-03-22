@@ -614,7 +614,7 @@ class AsyncProgramDatabase:
             island_spawn_strategy=self.island_spawn_strategy,
             island_spawn_subtree_size=self.island_spawn_subtree_size,
             program_repository=bundle.programs,
-            island_repository=bundle.islands,
+            island_controller=bundle.islands,
             archive_policy=create_archive_policy(
                 archive_selection_strategy=self.archive_selection_strategy,
                 archive_size=self.archive_size,

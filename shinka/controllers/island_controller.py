@@ -7,8 +7,8 @@ from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from shinka.database.connector import DatabaseConnector
-from shinka.database.island_repository import Island
 from shinka.database.models import ProgramEvaluationRecord, ProgramRecord
+from .types import Island
 
 
 class IslandController:

@@ -8,7 +8,7 @@ import rich.box  # type: ignore
 from rich.console import Console as RichConsole  # type: ignore
 from rich.table import Table as RichTable  # type: ignore
 
-from .island_repository import IslandRepository
+from shinka.controllers.island_controller import IslandController
 
 if TYPE_CHECKING:
     from .archive_policy import ArchivePolicy
@@ -40,7 +40,7 @@ class CombinedIslandManager:
         island_spawn_strategy: str,
         island_spawn_subtree_size: int,
         program_repository: "ProgramRepository",
-        island_repository: IslandRepository,
+        island_controller: IslandController,
         archive_policy: "ArchivePolicy",
     ):
         self.num_islands = num_islands
@@ -50,7 +50,7 @@ class CombinedIslandManager:
         self.island_spawn_strategy = island_spawn_strategy
         self.island_spawn_subtree_size = island_spawn_subtree_size
         self.program_repository = program_repository
-        self.repository = island_repository
+        self.repository = island_controller
         self.archive_policy = archive_policy
 
     def assign_island(self, program: Any) -> None:

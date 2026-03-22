@@ -8,8 +8,8 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from shinka.database.connector import DatabaseConnector
-from shinka.database.inspiration_repository import InspirationUse
 from shinka.database.models import ProgramInspirationRecord
+from .types import InspirationUse
 
 
 class InspirationController:

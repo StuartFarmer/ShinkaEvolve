@@ -40,7 +40,7 @@ def test_island_samplers():
                 island_spawn_strategy="initial",
                 island_spawn_subtree_size=1,
                 program_repository=repo,
-                island_repository=bundle.islands,
+                island_controller=bundle.controller.islands,
                 archive_policy=archive_policy,
             )
             island_sampler = create_island_sampler(

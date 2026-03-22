@@ -25,9 +25,9 @@ from typing import List, Optional
 import numpy as np
 
 from shinka.core.search_policies import InspirationSelector, ParentSelector
+from shinka.controllers.types import Island
 from shinka.database.program import Program
 from shinka.database.repository import ProgramRepository
-from shinka.database.island_repository import Island
 from shinka.database.archive_policy import ArchivePolicy, create_archive_policy
 
 

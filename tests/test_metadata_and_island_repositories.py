@@ -1,8 +1,13 @@
 import tempfile
 from pathlib import Path
 
-from shinka.controllers import DatabaseController, ProgramController, RunStateController
-from shinka.database import IslandRepository, MetadataRepository, Program, ProgramRepository
+from shinka.controllers import (
+    DatabaseController,
+    ProgramController,
+    RunStateController,
+)
+from shinka.controllers.metadata_controller import MetadataController
+from shinka.database import Program, ProgramRepository
 from shinka.database.connector import DatabaseConnector
 
 
@@ -17,7 +22,7 @@ def _program(program_id: str, *, generation: int = 0, island_idx: int = 0) -> Pr
     )
 
 
-def test_metadata_repository_loads_and_persists_run_state():
+def test_metadata_controller_loads_and_persists_generic_metadata():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "metadata_repo.db"
         db = ProgramRepository(str(db_path), num_islands=2, read_only=False)
@@ -29,20 +34,9 @@ def test_metadata_repository_loads_and_persists_run_state():
                 conn=db.conn,
                 cursor=db.cursor,
             )
-            repo = MetadataRepository(
-                session_factory=db.SessionLocal,
-                read_only=False,
-            )
-            repo.set("best_program_id", "prog-1")
-            repo.set("beam_search_parent_id", "prog-2")
-            repo.set("best_score_generation", "7")
-            repo.set("best_score_ever", "12.5")
-            snapshot = repo.load_snapshot()
-
-            assert snapshot.best_program_id == "prog-1"
-            assert snapshot.beam_search_parent_id == "prog-2"
-            assert snapshot.best_score_generation == 7
-            assert snapshot.best_score_ever == 12.5
+            controller = MetadataController(connector)
+            controller.set("custom_key", "custom_value")
+            assert controller.get("custom_key") == "custom_value"
         finally:
             db.close()
 
@@ -76,7 +70,7 @@ def test_run_state_controller_loads_and_persists_typed_run_state():
             db.close()
 
 
-def test_island_repository_reports_island_state():
+def test_island_controller_reports_island_state():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "island_repo.db"
         db = ProgramRepository(str(db_path), num_islands=3, read_only=False)
@@ -91,21 +85,18 @@ def test_island_repository_reports_island_state():
                 cursor=db.cursor,
             )
 
-            repo = IslandRepository(
-                session_factory=db.SessionLocal,
-                num_islands=db.num_islands,
-            )
             root_controller = DatabaseController(connector)
             program_controller = root_controller.programs
+            island_controller = root_controller.islands
 
-            assert repo.get_program_island("p1") == 2
-            initialized = repo.list_initialized_islands()
+            assert island_controller.get_program_island("p1") == 2
+            initialized = island_controller.list_initialized_islands()
             assert [island.island_idx for island in initialized] == [0, 2]
-            islands = repo.list_islands()
+            islands = island_controller.list_islands()
             assert [island.island_idx for island in islands] == [0, 1, 2]
             assert islands[1].initialized is False
-            assert repo.get_island_populations() == {0: 1, 1: 0, 2: 1}
-            assert repo.get_next_island_index() == 3
+            assert island_controller.get_island_populations() == {0: 1, 1: 0, 2: 1}
+            assert island_controller.get_next_island_index() == 3
             assert program_controller.get_best_program_row()["id"] == "p1"
             assert program_controller.get_initial_program_row()["id"] == "p0"
         finally:

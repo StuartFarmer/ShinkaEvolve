@@ -35,11 +35,9 @@ from shinka.controllers.inspiration_controller import InspirationController
 from shinka.controllers.metadata_controller import MetadataController
 from shinka.controllers.program_controller import ProgramController
 from shinka.controllers.run_state_controller import RunStateController
+from shinka.controllers.types import InspirationUse, Island
 from .complexity import analyze_code_metrics
 from .program import Program
-from .inspiration_repository import InspirationRepository, InspirationUse
-from .island_repository import Island, IslandRepository
-from .metadata_repository import MetadataRepository
 from .models import (
     Base,
     ProgramEmbeddingProjectionRecord,
@@ -107,9 +105,6 @@ class ProgramRepository:
         self.metadata_controller: MetadataController | None = None
         self.inspiration_controller: InspirationController | None = None
         self.embedding_controller: EmbeddingController | None = None
-        self.metadata_repo: MetadataRepository | None = None
-        self.island_repo: IslandRepository | None = None
-        self.inspiration_repo: InspirationRepository | None = None
 
         self._connect()
         self._ensure_schema()
@@ -158,19 +153,7 @@ class ProgramRepository:
         repo.metadata_controller = MetadataController(repo.connector)
         repo.inspiration_controller = InspirationController(repo.connector)
         repo.embedding_controller = EmbeddingController(repo.connector)
-        repo.metadata_repo = MetadataRepository(
-            session_factory=repo.SessionLocal,
-            read_only=read_only,
-        )
-        repo.inspiration_repo = InspirationRepository(
-            session_factory=repo.SessionLocal,
-            read_only=read_only,
-        )
         repo.island_controller = IslandController(repo.connector)
-        repo.island_repo = IslandRepository(
-            session_factory=repo.SessionLocal,
-            num_islands=num_islands,
-        )
         if ensure_schema and not read_only:
             repo._ensure_schema()
         repo._load_metadata()
@@ -191,19 +174,7 @@ class ProgramRepository:
         self.metadata_controller = MetadataController(self.connector)
         self.inspiration_controller = InspirationController(self.connector)
         self.embedding_controller = EmbeddingController(self.connector)
-        self.metadata_repo = MetadataRepository(
-            session_factory=self.SessionLocal,
-            read_only=self.read_only,
-        )
-        self.inspiration_repo = InspirationRepository(
-            session_factory=self.SessionLocal,
-            read_only=self.read_only,
-        )
         self.island_controller = IslandController(self.connector)
-        self.island_repo = IslandRepository(
-            session_factory=self.SessionLocal,
-            num_islands=self.num_islands,
-        )
 
     def _ensure_schema(self) -> None:
         if self.read_only:
@@ -220,9 +191,6 @@ class ProgramRepository:
         self.cursor.execute("PRAGMA foreign_keys = ON;")
 
         Base.metadata.create_all(self.engine)
-        if self.metadata_repo is None:
-            raise ConnectionError("Repository metadata store not initialized.")
-        self.metadata_repo.ensure_schema()
         self.conn.commit()
 
     def _load_metadata(self) -> None:
@@ -236,9 +204,9 @@ class ProgramRepository:
         if self.run_state_controller is not None and key in RunStateController.SUPPORTED_KEYS:
             self.run_state_controller.set(key, value)
             return
-        if self.metadata_repo is None:
+        if self.metadata_controller is None:
             raise ConnectionError("Repository metadata store not initialized.")
-        self.metadata_repo.set(key, value)
+        self.metadata_controller.set(key, value)
 
     def get_metadata(self, key: str, default: Optional[str] = None) -> Optional[str]:
         warnings.warn(
@@ -1072,9 +1040,9 @@ class ProgramRepository:
                             projection_metadata_json={},
                         )
                     )
-            if self.inspiration_repo is None:
-                raise ConnectionError("Repository inspiration store not initialized.")
-            self.inspiration_repo.replace_for_child(
+            if self.inspiration_controller is None:
+                raise ConnectionError("Repository inspiration controller not initialized.")
+            self.inspiration_controller.replace_for_child(
                 new_id,
                 [
                     InspirationUse(
@@ -1212,13 +1180,13 @@ class ProgramRepository:
                     .where(ProgramRecord.id == new_parent_id)
                     .values(children_count=ProgramRecord.children_count + 1)
                 )
-            if self.inspiration_repo is None:
-                raise ConnectionError("Repository inspiration store not initialized.")
+            if self.inspiration_controller is None:
+                raise ConnectionError("Repository inspiration controller not initialized.")
             source_archive_ids = list(
                 source_program.get("archive_inspiration_ids") or []
             )
             source_top_k_ids = list(source_program.get("top_k_inspiration_ids") or [])
-            self.inspiration_repo.replace_for_child(
+            self.inspiration_controller.replace_for_child(
                 new_id,
                 [
                     InspirationUse(

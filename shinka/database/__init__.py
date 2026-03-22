@@ -5,13 +5,10 @@ __all__ = [
     "AsyncProgramDatabase",
     "ProgramRepository",
     "RepositoryBundle",
-    "InspirationRepository",
     "InspirationUse",
     "ProgramCountSnapshot",
-    "MetadataRepository",
     "RunMetadataSnapshot",
     "Island",
-    "IslandRepository",
     "ArchivePolicy",
     "FitnessArchivePolicy",
     "CrowdingArchivePolicy",
@@ -54,27 +51,18 @@ def __getattr__(name):
         from .repository_bundle import RepositoryBundle
 
         return RepositoryBundle
-    if name in {"InspirationRepository", "InspirationUse"}:
-        from .inspiration_repository import InspirationRepository, InspirationUse
+    if name == "InspirationUse":
+        from shinka.controllers.types import InspirationUse
 
-        return {
-            "InspirationRepository": InspirationRepository,
-            "InspirationUse": InspirationUse,
-        }[name]
-    if name in {"MetadataRepository", "RunMetadataSnapshot"}:
-        from .metadata_repository import MetadataRepository, RunMetadataSnapshot
+        return InspirationUse
+    if name == "RunMetadataSnapshot":
+        from shinka.controllers.types import RunMetadataSnapshot
 
-        return {
-            "MetadataRepository": MetadataRepository,
-            "RunMetadataSnapshot": RunMetadataSnapshot,
-        }[name]
-    if name in {"Island", "IslandRepository"}:
-        from .island_repository import Island, IslandRepository
+        return RunMetadataSnapshot
+    if name == "Island":
+        from shinka.controllers.types import Island
 
-        return {
-            "Island": Island,
-            "IslandRepository": IslandRepository,
-        }[name]
+        return Island
     if name in {
         "ArchivePolicy",
         "FitnessArchivePolicy",

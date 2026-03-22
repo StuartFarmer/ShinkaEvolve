@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Optional
 
 if TYPE_CHECKING:
-    from .dbase import Program
+    from .program import Program
     from .islands import CombinedIslandManager
     from .repository import ProgramRepository
 

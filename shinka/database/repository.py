@@ -28,7 +28,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from .complexity import analyze_code_metrics
-from .dbase import Program
+from .program import Program
 from .inspiration_repository import InspirationRepository, InspirationUse
 from .island_repository import Island, IslandRepository
 from .metadata_repository import MetadataRepository
@@ -1180,16 +1180,6 @@ class ProgramRepository:
                 select(func.count(ProgramRecord.id), func.max(ProgramRecord.timestamp))
             ).one()
         return ProgramCountSnapshot(count=int(count or 0), max_timestamp=max_timestamp)
-
-    @property
-    def db(self):
-        from .dbase import ProgramDatabase
-
-        return ProgramDatabase(
-            db_path=self.db_path,
-            num_islands=self.num_islands,
-            read_only=self.read_only,
-        )
 
     def close(self) -> None:
         if self.conn:

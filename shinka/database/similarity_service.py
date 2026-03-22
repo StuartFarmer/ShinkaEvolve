@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, List, Optional
 import numpy as np
 
 if TYPE_CHECKING:
-    from .dbase import Program
+    from .program import Program
     from .repository import ProgramRepository
 
 logger = logging.getLogger(__name__)

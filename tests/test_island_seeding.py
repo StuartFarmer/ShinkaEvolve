@@ -5,18 +5,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from shinka.core.async_runner import ShinkaEvolveRunner
-from shinka.database import Program, ProgramDatabase, ProgramRepository
+from shinka.database import Program, ProgramRepository
 
 
 def test_explicit_island_assignment_is_preserved():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "explicit_island.db"
-        db = ProgramDatabase(
-            db_path=str(db_path),
-            num_islands=3,
-            embedding_model="",
-            read_only=False,
-        )
+        db = ProgramRepository(str(db_path), num_islands=3, read_only=False)
 
         seeded_program = Program(
             id="seed_program",
@@ -28,9 +23,9 @@ def test_explicit_island_assignment_is_preserved():
             metadata={"family_id": "family_two"},
         )
 
-        repo = ProgramRepository(str(db_path), num_islands=3, read_only=True)
         try:
             db.add(seeded_program)
+            repo = ProgramRepository(str(db_path), num_islands=3, read_only=True)
             stored_program = repo.get("seed_program")
             assert stored_program is not None
             assert stored_program.island_idx == 2

@@ -13,7 +13,7 @@ from typing import Any, List, Optional, Sequence
 
 import numpy as np
 
-from shinka.database.dbase import Program
+from shinka.database.program import Program
 from shinka.database.repository import ProgramRepository
 
 logger = logging.getLogger(__name__)

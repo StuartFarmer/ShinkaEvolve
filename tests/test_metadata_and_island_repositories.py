@@ -5,7 +5,7 @@ from shinka.database import (
     IslandRepository,
     MetadataRepository,
     Program,
-    ProgramDatabase,
+    ProgramRepository,
 )
 
 
@@ -23,12 +23,7 @@ def _program(program_id: str, *, generation: int = 0, island_idx: int = 0) -> Pr
 def test_metadata_repository_loads_and_persists_run_state():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "metadata_repo.db"
-        db = ProgramDatabase(
-            db_path=str(db_path),
-            num_islands=2,
-            embedding_model="",
-            read_only=False,
-        )
+        db = ProgramRepository(str(db_path), num_islands=2, read_only=False)
         try:
             repo = MetadataRepository(conn=db.conn, cursor=db.cursor, read_only=False)
             repo.set("best_program_id", "prog-1")
@@ -48,12 +43,7 @@ def test_metadata_repository_loads_and_persists_run_state():
 def test_island_repository_reports_island_state():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "island_repo.db"
-        db = ProgramDatabase(
-            db_path=str(db_path),
-            num_islands=3,
-            embedding_model="",
-            read_only=False,
-        )
+        db = ProgramRepository(str(db_path), num_islands=3, read_only=False)
         try:
             db.add(_program("p0", generation=0, island_idx=0))
             db.add(_program("p1", generation=1, island_idx=2))

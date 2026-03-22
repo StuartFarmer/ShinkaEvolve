@@ -2,7 +2,11 @@
 
 import tempfile
 from pathlib import Path
-from shinka.database import ProgramDatabase, Program
+from shinka.database import ProgramRepository, Program
+from shinka.database.island_sampler import create_island_sampler
+from shinka.database.archive_policy import create_archive_policy
+from shinka.database.islands import CombinedIslandManager
+from shinka.database.repository_bundle import RepositoryBundle
 
 
 def test_island_samplers():
@@ -17,12 +21,31 @@ def test_island_samplers():
         for strategy in strategies:
             print(f"\n=== Testing {strategy} strategy ===")
 
-            db = ProgramDatabase(
+            bundle = RepositoryBundle.open(
                 db_path=str(db_path),
                 num_islands=3,
-                island_selection_strategy=strategy,
-                embedding_model="",
                 read_only=False,
+            )
+            repo = bundle.programs
+            archive_policy = create_archive_policy(
+                archive_selection_strategy="fitness",
+                archive_size=40,
+                archive_criteria={"combined_score": 1.0},
+            )
+            island_manager = CombinedIslandManager(
+                num_islands=3,
+                migration_interval=10,
+                migration_rate=0.0,
+                island_elitism=True,
+                island_spawn_strategy="initial",
+                island_spawn_subtree_size=1,
+                program_repository=repo,
+                island_repository=bundle.islands,
+                archive_policy=archive_policy,
+            )
+            island_sampler = create_island_sampler(
+                program_repository=repo,
+                strategy=strategy,
             )
 
             # Add some test programs to different islands
@@ -35,16 +58,16 @@ def test_island_samplers():
                         combined_score=float(island_idx + 1),  # Different scores
                         island_idx=island_idx,
                     )
-                    db.add(program)
+                    repo.add(program)
 
             # Test sampling
-            initialized_islands = db.island_manager.get_initialized_islands()
+            initialized_islands = island_manager.get_initialized_islands()
             print(f"Initialized islands: {initialized_islands}")
 
             # Sample multiple times to see distribution
             samples = {}
             for _ in range(30):
-                sampled = db.island_sampler.sample_island(initialized_islands)
+                sampled = island_sampler.sample_island(initialized_islands)
                 samples[sampled] = samples.get(sampled, 0) + 1
 
             print(f"Sample distribution: {samples}")
@@ -52,7 +75,7 @@ def test_island_samplers():
             # Verify all strategies can sample
             assert len(samples) > 0, f"{strategy} strategy produced no samples"
 
-            db.close()
+            bundle.close()
 
             # Clean up for next test
             if db_path.exists():

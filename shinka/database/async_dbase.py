@@ -12,7 +12,7 @@ from typing import Callable, List, Optional, Tuple, Dict, Any
 from concurrent.futures import ThreadPoolExecutor
 
 from .complexity import analyze_code_metrics
-from .dbase import Program
+from .program import Program
 from .archive_policy import create_archive_policy
 from .embedding_feature_service import EmbeddingFeatureService
 from .islands import CombinedIslandManager

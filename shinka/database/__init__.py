@@ -1,4 +1,5 @@
-from .dbase import ProgramDatabase, Program, DatabaseConfig
+from .program import Program
+from .config import DatabaseConfig
 from .async_dbase import AsyncProgramDatabase
 from .repository import ProgramRepository, ProgramCountSnapshot
 from .repository_bundle import RepositoryBundle
@@ -16,7 +17,6 @@ from .prompt_dbase import (
 )
 
 __all__ = [
-    "ProgramDatabase",
     "Program",
     "DatabaseConfig",
     "AsyncProgramDatabase",

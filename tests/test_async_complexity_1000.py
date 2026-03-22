@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict
 
-from shinka.database import Program, ProgramDatabase, ProgramRepository
+from shinka.database import Program, ProgramRepository
 
 
 # Allow running this file directly with `python tests/test_async_complexity_1000.py`
@@ -55,24 +55,14 @@ async def _run_single_additions_with_complexity() -> float:
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "async_single.db"
-        sync_db = ProgramDatabase(
-            db_path=str(db_path),
-            num_islands=1,
-            embedding_model="",
-        )
+        last_iteration = 0
         async_db = AsyncProgramDatabase(
             db_path=str(db_path),
             num_islands=1,
             embedding_model="",
-            ensure_embedding_client=sync_db._ensure_embedding_client,
-            update_last_iteration=lambda value: setattr(
-                sync_db,
-                "last_iteration",
-                max(getattr(sync_db, "last_iteration", 0), value),
-            ),
-            update_beam_search_parent=lambda parent_id: setattr(
-                sync_db, "beam_search_parent_id", parent_id
-            ),
+            ensure_embedding_client=lambda: None,
+            update_last_iteration=lambda value: max(last_iteration, value),
+            update_beam_search_parent=lambda parent_id: parent_id,
             embedding_recompute_interval=EMBEDDING_RECOMPUTE_INTERVAL,
         )
 
@@ -95,7 +85,6 @@ async def _run_single_additions_with_complexity() -> float:
         finally:
             async_dbase_module.analyze_code_metrics = original_analyze
             await async_db.close_async()
-            sync_db.close()
 
 
 async def _run_concurrent_additions_with_complexity() -> float:
@@ -104,24 +93,14 @@ async def _run_concurrent_additions_with_complexity() -> float:
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "async_concurrent.db"
-        sync_db = ProgramDatabase(
-            db_path=str(db_path),
-            num_islands=1,
-            embedding_model="",
-        )
+        last_iteration = 0
         async_db = AsyncProgramDatabase(
             db_path=str(db_path),
             num_islands=1,
             embedding_model="",
-            ensure_embedding_client=sync_db._ensure_embedding_client,
-            update_last_iteration=lambda value: setattr(
-                sync_db,
-                "last_iteration",
-                max(getattr(sync_db, "last_iteration", 0), value),
-            ),
-            update_beam_search_parent=lambda parent_id: setattr(
-                sync_db, "beam_search_parent_id", parent_id
-            ),
+            ensure_embedding_client=lambda: None,
+            update_last_iteration=lambda value: max(last_iteration, value),
+            update_beam_search_parent=lambda parent_id: parent_id,
             embedding_recompute_interval=EMBEDDING_RECOMPUTE_INTERVAL,
         )
 
@@ -152,7 +131,6 @@ async def _run_concurrent_additions_with_complexity() -> float:
         finally:
             async_dbase_module.analyze_code_metrics = original_analyze
             await async_db.close_async()
-            sync_db.close()
 
 
 def test_single_additions_with_complexity():

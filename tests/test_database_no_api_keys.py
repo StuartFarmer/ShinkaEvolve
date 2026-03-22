@@ -2,7 +2,7 @@ import asyncio
 import tempfile
 from pathlib import Path
 
-from shinka.database import Program, ProgramDatabase, ProgramRepository
+from shinka.database import Program, ProgramRepository
 from shinka.database.async_dbase import AsyncProgramDatabase
 
 
@@ -18,12 +18,12 @@ def _program(program_id: str) -> Program:
 
 
 def test_program_database_init_without_openai_key(monkeypatch):
-    """DB construction should not require API credentials."""
+    """Repository-backed storage construction should not require API credentials."""
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "no_key_init.db"
-        db = ProgramDatabase(db_path=str(db_path), num_islands=1)
+        db = ProgramRepository(str(db_path), num_islands=1, read_only=False)
         try:
             db.add(_program("p0"))
             repo = ProgramRepository(str(db_path), num_islands=1, read_only=True)
@@ -40,24 +40,15 @@ def test_async_db_add_without_openai_key_when_embeddings_disabled(monkeypatch):
     async def _run():
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "no_key_async.db"
-            sync_db = ProgramDatabase(
-                db_path=str(db_path),
-                num_islands=1,
-                embedding_model="",
-            )
+            last_iteration = 0
+            beam_search_parent_id = None
             async_db = AsyncProgramDatabase(
                 db_path=str(db_path),
                 num_islands=1,
                 embedding_model="",
-                ensure_embedding_client=sync_db._ensure_embedding_client,
-                update_last_iteration=lambda value: setattr(
-                    sync_db,
-                    "last_iteration",
-                    max(getattr(sync_db, "last_iteration", 0), value),
-                ),
-                update_beam_search_parent=lambda parent_id: setattr(
-                    sync_db, "beam_search_parent_id", parent_id
-                ),
+                ensure_embedding_client=lambda: None,
+                update_last_iteration=lambda value: max(last_iteration, value),
+                update_beam_search_parent=lambda parent_id: parent_id,
             )
             try:
                 await async_db.add_program_async(_program("async-p0"))
@@ -66,6 +57,5 @@ def test_async_db_add_without_openai_key_when_embeddings_disabled(monkeypatch):
                 repo.close()
             finally:
                 await async_db.close_async()
-                sync_db.close()
 
     asyncio.run(_run())

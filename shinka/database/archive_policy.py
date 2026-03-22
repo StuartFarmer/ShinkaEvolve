@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from .dbase import Program
+from .program import Program
 
 logger = logging.getLogger(__name__)
 

@@ -2,179 +2,131 @@
 
 import tempfile
 from pathlib import Path
-from shinka.database import ProgramDatabase, Program
+
+from shinka.database import Program
+from shinka.database.archive_policy import create_archive_policy
+from shinka.database.islands import CombinedIslandManager
+from shinka.database.program_write_service import ProgramWriteService
+from shinka.database.repository_bundle import RepositoryBundle
+
+
+class RuntimeHarness:
+    def __init__(
+        self,
+        db_path: str,
+        *,
+        num_islands: int,
+        enable_dynamic_islands: bool,
+        stagnation_threshold: int,
+        island_spawn_strategy: str = "initial",
+    ) -> None:
+        self.bundle = RepositoryBundle.open(
+            db_path=db_path,
+            num_islands=num_islands,
+            read_only=False,
+        )
+        self.program_repository = self.bundle.programs
+        self.metadata_repo = self.bundle.metadata
+        self.num_islands = num_islands
+        self.enable_dynamic_islands = enable_dynamic_islands
+        self.stagnation_threshold = stagnation_threshold
+        self.best_score_generation = 0
+        self.best_score_ever = None
+        self.last_iteration = 0
+        self.best_program_id = None
+
+        self.archive_policy = create_archive_policy(
+            archive_selection_strategy="fitness",
+            archive_size=40,
+            archive_criteria={"combined_score": 1.0},
+        )
+        self.island_manager = CombinedIslandManager(
+            num_islands=num_islands,
+            migration_interval=10,
+            migration_rate=0.0,
+            island_elitism=True,
+            island_spawn_strategy=island_spawn_strategy,
+            island_spawn_subtree_size=1,
+            program_repository=self.program_repository,
+            island_repository=self.bundle.islands,
+            archive_policy=self.archive_policy,
+        )
+        self.write_service = ProgramWriteService(
+            program_repository=self.program_repository,
+            island_manager=self.island_manager,
+            update_best_program=self._update_best_program,
+            update_metadata=self.program_repository.set_metadata,
+            recompute_embeddings=None,
+            print_program_summary=None,
+            maybe_spawn_island=self.check_and_spawn_island_if_stagnant,
+        )
+
+    def _update_best_program(self, program: Program) -> None:
+        if not program.correct:
+            return
+        current_best = (
+            self.program_repository.get(self.best_program_id)
+            if self.best_program_id
+            else None
+        )
+        current_best_score = (
+            float(current_best.combined_score or 0.0) if current_best is not None else None
+        )
+        new_score = float(program.combined_score or 0.0)
+        if current_best_score is None or new_score > current_best_score:
+            self.best_program_id = program.id
+            self.program_repository.set_metadata("best_program_id", program.id)
+            if self.best_score_ever is None or new_score > self.best_score_ever:
+                self.best_score_ever = new_score
+                self.best_score_generation = program.generation
+                self.program_repository.set_metadata(
+                    "best_score_generation",
+                    str(self.best_score_generation),
+                )
+                self.program_repository.set_metadata(
+                    "best_score_ever",
+                    str(self.best_score_ever),
+                )
+
+    def add(self, program: Program) -> None:
+        result = self.write_service.add(
+            program,
+            verbose=False,
+            current_last_iteration=self.last_iteration,
+        )
+        self.last_iteration = result.last_iteration
+
+    def is_stagnant(self, current_generation: int) -> bool:
+        if not self.enable_dynamic_islands:
+            return False
+        return current_generation - self.best_score_generation >= self.stagnation_threshold
+
+    def check_and_spawn_island_if_stagnant(self, current_generation: int) -> bool:
+        if not self.is_stagnant(current_generation):
+            return False
+        spawned = self.island_manager.spawn_new_island()
+        if spawned:
+            self.best_score_generation = current_generation
+            self.program_repository.set_metadata(
+                "best_score_generation",
+                str(self.best_score_generation),
+            )
+        return spawned
+
+    def close(self) -> None:
+        self.bundle.close()
 
 
 def test_stagnation_detection():
-    """Test that stagnation is correctly detected."""
-
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "test_stagnation.db"
-
-        db = ProgramDatabase(
-            db_path=str(db_path),
-            num_islands=2,
-            enable_dynamic_islands=True,
-            stagnation_threshold=5,  # Very short threshold for testing
-            embedding_model="",
-            read_only=False,
-        )
-
-        # Add initial program (generation 0)
-        initial_program = Program(
-            id="initial_prog",
-            code="def initial(): return 0",
-            correct=True,
-            combined_score=1.0,
-            generation=0,
-            island_idx=0,
-        )
-        db.add(initial_program)
-
-        # At generation 0, should not be stagnant
-        assert not db.is_stagnant(0), "Should not be stagnant at generation 0"
-        assert not db.is_stagnant(4), (
-            "Should not be stagnant at generation 4 (under threshold)"
-        )
-
-        # At generation 5+, should be stagnant (5 gens without improvement)
-        assert db.is_stagnant(5), "Should be stagnant at generation 5 (met threshold)"
-        assert db.is_stagnant(10), (
-            "Should be stagnant at generation 10 (past threshold)"
-        )
-
-        db.close()
-        print("✓ Stagnation detection test passed!")
-
-
-def test_dynamic_island_spawning():
-    """Test that new islands are spawned when stagnation is detected."""
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        db_path = Path(tmpdir) / "test_spawn.db"
-
-        db = ProgramDatabase(
-            db_path=str(db_path),
-            num_islands=2,
-            enable_dynamic_islands=True,
-            stagnation_threshold=3,  # Very short threshold for testing
-            embedding_model="",
-            read_only=False,
-        )
-
-        # Add initial program (generation 0)
-        initial_program = Program(
-            id="initial_prog",
-            code="def initial(): return 0",
-            correct=True,
-            combined_score=1.0,
-            generation=0,
-            island_idx=0,
-        )
-        db.add(initial_program)
-
-        # Get initial island count
-        initial_islands = db.island_manager.get_island_populations()
-        print(f"Initial islands: {initial_islands}")
-
-        # Add programs without improvement until stagnation
-        for gen in range(1, 5):
-            program = Program(
-                id=f"prog_gen_{gen}",
-                code=f"def test(): return {gen}",
-                correct=True,
-                combined_score=0.5,  # Lower than initial, no improvement
-                generation=gen,
-                island_idx=0,
-            )
-            db.add(program)
-
-        # Check that a new island was spawned
-        final_islands = db.island_manager.get_island_populations()
-        print(f"Final islands: {final_islands}")
-
-        # Should have more islands now (at least one spawned)
-        assert len(final_islands) > len(initial_islands), (
-            f"Expected new island to be spawned. Initial: {initial_islands}, Final: {final_islands}"
-        )
-
-        # The new island should have the initial program
-        spawned_island_idx = max(final_islands.keys())
-        assert spawned_island_idx >= db.num_islands, (
-            f"Spawned island index {spawned_island_idx} should be >= configured num_islands {db.num_islands}"
-        )
-
-        db.close()
-        print("✓ Dynamic island spawning test passed!")
-
-
-def test_no_spawning_when_disabled():
-    """Test that no islands are spawned when feature is disabled."""
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        db_path = Path(tmpdir) / "test_disabled.db"
-
-        db = ProgramDatabase(
-            db_path=str(db_path),
-            num_islands=2,
-            enable_dynamic_islands=False,  # Disabled
-            stagnation_threshold=3,
-            embedding_model="",
-            read_only=False,
-        )
-
-        # Add initial program
-        initial_program = Program(
-            id="initial_prog",
-            code="def initial(): return 0",
-            correct=True,
-            combined_score=1.0,
-            generation=0,
-            island_idx=0,
-        )
-        db.add(initial_program)
-
-        initial_islands = db.island_manager.get_island_populations()
-
-        # Add programs without improvement
-        for gen in range(1, 10):
-            program = Program(
-                id=f"prog_gen_{gen}",
-                code=f"def test(): return {gen}",
-                correct=True,
-                combined_score=0.5,
-                generation=gen,
-                island_idx=0,
-            )
-            db.add(program)
-
-        final_islands = db.island_manager.get_island_populations()
-
-        # Should NOT have spawned new islands
-        assert len(final_islands) == len(initial_islands), (
-            f"No new islands should be spawned when disabled. Initial: {initial_islands}, Final: {final_islands}"
-        )
-
-        db.close()
-        print("✓ No-spawning-when-disabled test passed!")
-
-
-def test_stagnation_reset_on_improvement():
-    """Test that stagnation counter resets when best score improves."""
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        db_path = Path(tmpdir) / "test_reset.db"
-
-        db = ProgramDatabase(
-            db_path=str(db_path),
+        runtime = RuntimeHarness(
+            str(db_path),
             num_islands=2,
             enable_dynamic_islands=True,
             stagnation_threshold=5,
-            embedding_model="",
-            read_only=False,
         )
 
-        # Add initial program
         initial_program = Program(
             id="initial_prog",
             code="def initial(): return 0",
@@ -183,74 +135,27 @@ def test_stagnation_reset_on_improvement():
             generation=0,
             island_idx=0,
         )
-        db.add(initial_program)
+        runtime.add(initial_program)
 
-        # Add programs without improvement up to threshold - 1
-        for gen in range(1, 4):
-            program = Program(
-                id=f"prog_gen_{gen}",
-                code=f"def test(): return {gen}",
-                correct=True,
-                combined_score=0.5,  # No improvement
-                generation=gen,
-                island_idx=0,
-            )
-            db.add(program)
+        assert not runtime.is_stagnant(0)
+        assert not runtime.is_stagnant(4)
+        assert runtime.is_stagnant(5)
+        assert runtime.is_stagnant(10)
+        runtime.close()
 
-        # Now add a better program - should reset stagnation
-        better_program = Program(
-            id="better_prog",
-            code="def better(): return 100",
-            correct=True,
-            combined_score=2.0,  # Improvement!
-            generation=4,
-            island_idx=0,
-        )
-        db.add(better_program)
 
-        # Check that best_score_generation was updated
-        assert db.best_score_generation == 4, (
-            f"best_score_generation should be 4, got {db.best_score_generation}"
-        )
-        assert db.best_score_ever == 2.0, (
-            f"best_score_ever should be 2.0, got {db.best_score_ever}"
+def test_dynamic_island_spawning():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test_spawn.db"
+        runtime = RuntimeHarness(
+            str(db_path),
+            num_islands=2,
+            enable_dynamic_islands=True,
+            stagnation_threshold=3,
         )
 
-        # Should not be stagnant at generation 8 (only 4 gens since improvement)
-        assert not db.is_stagnant(8), (
-            "Should not be stagnant 4 generations after improvement"
-        )
-
-        # Should be stagnant at generation 9 (5 gens since improvement)
-        assert db.is_stagnant(9), "Should be stagnant 5 generations after improvement"
-
-        db.close()
-        print("✓ Stagnation reset on improvement test passed!")
-
-
-def test_spawn_strategies():
-    """Test different island spawn strategies."""
-
-    strategies = ["initial", "best", "archive_random"]
-
-    for strategy in strategies:
-        print(f"\n=== Testing spawn strategy: {strategy} ===")
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = Path(tmpdir) / f"test_spawn_{strategy}.db"
-
-            db = ProgramDatabase(
-                db_path=str(db_path),
-                num_islands=2,
-                enable_dynamic_islands=True,
-                stagnation_threshold=3,
-                island_spawn_strategy=strategy,
-                embedding_model="",
-                read_only=False,
-            )
-
-            # Add initial program (generation 0)
-            initial_program = Program(
+        runtime.add(
+            Program(
                 id="initial_prog",
                 code="def initial(): return 0",
                 correct=True,
@@ -258,67 +163,175 @@ def test_spawn_strategies():
                 generation=0,
                 island_idx=0,
             )
-            db.add(initial_program)
+        )
+        initial_islands = runtime.island_manager.get_island_populations()
 
-            # Add a better program (will be the "best")
-            best_program = Program(
-                id="best_prog",
-                code="def best(): return 100",
-                correct=True,
-                combined_score=5.0,  # Higher score
-                generation=1,
-                island_idx=0,
-            )
-            db.add(best_program)
-
-            # Add programs without improvement until stagnation triggers
-            for gen in range(2, 6):
-                program = Program(
+        for gen in range(1, 5):
+            runtime.add(
+                Program(
                     id=f"prog_gen_{gen}",
                     code=f"def test(): return {gen}",
                     correct=True,
-                    combined_score=0.5,  # Lower than best, no improvement
+                    combined_score=0.5,
                     generation=gen,
                     island_idx=0,
                 )
-                db.add(program)
-
-            # Check that a new island was spawned
-            final_islands = db.island_manager.get_island_populations()
-            print(f"Final islands: {final_islands}")
-
-            # Should have spawned at least one new island
-            assert len(final_islands) > 2, (
-                f"Expected new island for strategy '{strategy}'. Islands: {final_islands}"
             )
 
-            # Check the spawned program's metadata
+        final_islands = runtime.island_manager.get_island_populations()
+        assert len(final_islands) > len(initial_islands)
+        assert max(final_islands.keys()) >= runtime.num_islands
+        runtime.close()
+
+
+def test_no_spawning_when_disabled():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test_disabled.db"
+        runtime = RuntimeHarness(
+            str(db_path),
+            num_islands=2,
+            enable_dynamic_islands=False,
+            stagnation_threshold=3,
+        )
+
+        runtime.add(
+            Program(
+                id="initial_prog",
+                code="def initial(): return 0",
+                correct=True,
+                combined_score=1.0,
+                generation=0,
+                island_idx=0,
+            )
+        )
+        initial_islands = runtime.island_manager.get_island_populations()
+
+        for gen in range(1, 10):
+            runtime.add(
+                Program(
+                    id=f"prog_gen_{gen}",
+                    code=f"def test(): return {gen}",
+                    correct=True,
+                    combined_score=0.5,
+                    generation=gen,
+                    island_idx=0,
+                )
+            )
+
+        final_islands = runtime.island_manager.get_island_populations()
+        assert len(final_islands) == len(initial_islands)
+        runtime.close()
+
+
+def test_stagnation_reset_on_improvement():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test_reset.db"
+        runtime = RuntimeHarness(
+            str(db_path),
+            num_islands=2,
+            enable_dynamic_islands=True,
+            stagnation_threshold=5,
+        )
+
+        runtime.add(
+            Program(
+                id="initial_prog",
+                code="def initial(): return 0",
+                correct=True,
+                combined_score=1.0,
+                generation=0,
+                island_idx=0,
+            )
+        )
+
+        for gen in range(1, 4):
+            runtime.add(
+                Program(
+                    id=f"prog_gen_{gen}",
+                    code=f"def test(): return {gen}",
+                    correct=True,
+                    combined_score=0.5,
+                    generation=gen,
+                    island_idx=0,
+                )
+            )
+
+        runtime.add(
+            Program(
+                id="better_prog",
+                code="def better(): return 100",
+                correct=True,
+                combined_score=2.0,
+                generation=4,
+                island_idx=0,
+            )
+        )
+
+        assert runtime.best_score_generation == 4
+        assert runtime.best_score_ever == 2.0
+        assert not runtime.is_stagnant(8)
+        assert runtime.is_stagnant(9)
+        runtime.close()
+
+
+def test_spawn_strategies():
+    strategies = ["initial", "best", "archive_random"]
+
+    for strategy in strategies:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / f"test_spawn_{strategy}.db"
+            runtime = RuntimeHarness(
+                str(db_path),
+                num_islands=2,
+                enable_dynamic_islands=True,
+                stagnation_threshold=3,
+                island_spawn_strategy=strategy,
+            )
+
+            runtime.add(
+                Program(
+                    id="initial_prog",
+                    code="def initial(): return 0",
+                    correct=True,
+                    combined_score=1.0,
+                    generation=0,
+                    island_idx=0,
+                )
+            )
+            runtime.add(
+                Program(
+                    id="best_prog",
+                    code="def best(): return 100",
+                    correct=True,
+                    combined_score=5.0,
+                    generation=1,
+                    island_idx=0,
+                )
+            )
+
+            for gen in range(2, 6):
+                runtime.add(
+                    Program(
+                        id=f"prog_gen_{gen}",
+                        code=f"def test(): return {gen}",
+                        correct=True,
+                        combined_score=0.5,
+                        generation=gen,
+                        island_idx=0,
+                    )
+                )
+
+            final_islands = runtime.island_manager.get_island_populations()
+            assert len(final_islands) > 2
+
             spawned_island_idx = max(final_islands.keys())
-            db.cursor.execute(
-                "SELECT metadata FROM programs WHERE island_idx = ?",
-                (spawned_island_idx,),
-            )
-            row = db.cursor.fetchone()
-            if row:
-                import json
-
-                metadata = json.loads(row["metadata"] or "{}")
-                assert metadata.get("_spawn_strategy") == strategy, (
-                    f"Expected spawn strategy '{strategy}' in metadata"
-                )
-                print(
-                    f"Spawned program metadata: _spawn_strategy={metadata.get('_spawn_strategy')}"
-                )
-
-            db.close()
-
-        print(f"✓ Strategy '{strategy}' test passed!")
+            spawned = runtime.program_repository.list_by_island(spawned_island_idx)
+            assert spawned
+            metadata = spawned[0].metadata or {}
+            assert metadata.get("_spawn_strategy") == strategy
+            runtime.close()
 
 
 if __name__ == "__main__":
     test_stagnation_detection()
     test_dynamic_island_spawning()
-    test_no_spawning_when_disabled()
-    test_stagnation_reset_on_improvement()
-    test_spawn_strategies()
-    print("\n✓ All dynamic island tests passed!")

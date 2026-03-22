@@ -17,7 +17,8 @@ from .archive_policy import create_archive_policy
 from .embedding_feature_service import EmbeddingFeatureService
 from .islands import CombinedIslandManager
 from .program_write_service import ProgramWriteService
-from .repository import ProgramRepository
+from shinka.controllers import ProgramController
+from .connector import DatabaseConnector
 from .repository_bundle import RepositoryBundle
 
 logger = logging.getLogger(__name__)
@@ -191,11 +192,13 @@ class AsyncProgramDatabase:
         if self.enable_deadlock_debugging and op_id is not None:
             db_debugger.track_end(op_id, success=success)
 
-    def _open_repository(self, *, read_only: bool) -> ProgramRepository:
-        return ProgramRepository(
-            self.db_path,
-            num_islands=self.num_islands,
-            read_only=read_only,
+    def _open_repository(self, *, read_only: bool) -> ProgramController:
+        return ProgramController(
+            DatabaseConnector.open(
+                db_path=self.db_path,
+                num_islands=self.num_islands,
+                read_only=read_only,
+            )
         )
 
     async def _deadlock_monitor(self):

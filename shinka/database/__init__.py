@@ -3,7 +3,6 @@ __all__ = [
     "DatabaseConfig",
     "DatabaseConnector",
     "AsyncProgramDatabase",
-    "ProgramRepository",
     "RepositoryBundle",
     "InspirationUse",
     "ProgramCountSnapshot",
@@ -40,13 +39,10 @@ def __getattr__(name):
         from .async_dbase import AsyncProgramDatabase
 
         return AsyncProgramDatabase
-    if name in {"ProgramRepository", "ProgramCountSnapshot"}:
-        from .repository import ProgramCountSnapshot, ProgramRepository
+    if name == "ProgramCountSnapshot":
+        from .repository import ProgramCountSnapshot
 
-        return {
-            "ProgramRepository": ProgramRepository,
-            "ProgramCountSnapshot": ProgramCountSnapshot,
-        }[name]
+        return ProgramCountSnapshot
     if name == "RepositoryBundle":
         from .repository_bundle import RepositoryBundle
 

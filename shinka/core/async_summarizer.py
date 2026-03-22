@@ -335,12 +335,15 @@ class AsyncMetaSummarizer:
             if meta_cost > 0 and best_program and db_path:
                 try:
                     def update_metadata():
-                        from shinka.database import ProgramRepository
+                        from shinka.controllers import ProgramController
+                        from shinka.database.connector import DatabaseConnector
 
-                        thread_repo = ProgramRepository(
-                            db_path,
-                            num_islands=num_islands,
-                            read_only=False,
+                        thread_repo = ProgramController(
+                            DatabaseConnector.open(
+                                db_path=db_path,
+                                num_islands=num_islands,
+                                read_only=False,
+                            )
                         )
                         try:
                             if best_program.metadata is None:

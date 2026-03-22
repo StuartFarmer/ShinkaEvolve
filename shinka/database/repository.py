@@ -33,7 +33,6 @@ from shinka.controllers.island_controller import IslandController
 from shinka.controllers.embedding_controller import EmbeddingController
 from shinka.controllers.inspiration_controller import InspirationController
 from shinka.controllers.metadata_controller import MetadataController
-from shinka.controllers.program_controller import ProgramController
 from shinka.controllers.run_state_controller import RunStateController
 from shinka.controllers.types import InspirationUse, Island
 from .complexity import analyze_code_metrics
@@ -148,7 +147,6 @@ class ProgramRepository:
         repo.SessionLocal = repo.connector.SessionLocal
         repo.last_iteration = 0
         repo.best_program_id = None
-        repo.program_controller = ProgramController(repo.connector)
         repo.run_state_controller = RunStateController(repo.connector)
         repo.metadata_controller = MetadataController(repo.connector)
         repo.inspiration_controller = InspirationController(repo.connector)
@@ -169,7 +167,6 @@ class ProgramRepository:
         self.cursor = self.connector.cursor
         self.engine = self.connector.engine
         self.SessionLocal = self.connector.SessionLocal
-        self.program_controller = ProgramController(self.connector)
         self.run_state_controller = RunStateController(self.connector)
         self.metadata_controller = MetadataController(self.connector)
         self.inspiration_controller = InspirationController(self.connector)
@@ -813,16 +810,31 @@ class ProgramRepository:
             )
 
     def get_initial_program_row(self) -> Optional[dict[str, Any]]:
-        row = self.program_controller.get_initial_program_row()
-        if row is None:
-            return None
-        return self.get(row["id"]).to_dict()
+        with self._session() as session:
+            record = session.scalar(
+                select(ProgramRecord)
+                .where(
+                    ProgramRecord.generation == 0,
+                    ProgramRecord.parent_id.is_(None),
+                )
+                .order_by(ProgramRecord.timestamp.asc())
+                .limit(1)
+            )
+        return None if record is None else self.get(record.id).to_dict()
 
     def get_best_program_row(self) -> Optional[dict[str, Any]]:
-        row = self.program_controller.get_best_program_row()
-        if row is None:
-            return None
-        return self.get(row["id"]).to_dict()
+        with self._session() as session:
+            record = session.scalar(
+                select(ProgramRecord)
+                .join(
+                    ProgramEvaluationRecord,
+                    ProgramEvaluationRecord.program_id == ProgramRecord.id,
+                )
+                .where(ProgramEvaluationRecord.correct.is_(True))
+                .order_by(ProgramEvaluationRecord.combined_score.desc())
+                .limit(1)
+            )
+        return None if record is None else self.get(record.id).to_dict()
 
     def get_next_island_index(self) -> int:
         return self.island_controller.get_next_island_index()

@@ -21,7 +21,9 @@ from rich.console import Console
 from rich.table import Table
 import rich.box
 
-from shinka.database import Program, ProgramRepository
+from shinka.controllers import ProgramController
+from shinka.database import Program
+from shinka.database.connector import DatabaseConnector
 from shinka.database.archive_policy import create_archive_policy
 from shinka.database.async_dbase import AsyncProgramDatabase
 from shinka.database.display import DatabaseDisplay
@@ -366,7 +368,7 @@ class ShinkaEvolveRunner:
         # Database-backed services are initialized in _setup_async() once the
         # results directory is finalized.
         self.repository_bundle: Optional[RepositoryBundle] = None
-        self.program_repository: Optional[ProgramRepository] = None
+        self.program_repository: Optional[ProgramController] = None
         self.metadata_repo = None
         self.island_repo = None
         self.archive_policy = None
@@ -562,11 +564,13 @@ class ShinkaEvolveRunner:
                 results_dir,
             )
 
-    def _open_repository(self, *, read_only: bool) -> ProgramRepository:
-        return ProgramRepository(
-            self.db_path,
-            num_islands=self.num_islands,
-            read_only=read_only,
+    def _open_repository(self, *, read_only: bool) -> ProgramController:
+        return ProgramController(
+            DatabaseConnector.open(
+                db_path=self.db_path,
+                num_islands=self.num_islands,
+                read_only=read_only,
+            )
         )
 
     def _ensure_sync_embedding_client(self) -> Optional[EmbeddingClient]:

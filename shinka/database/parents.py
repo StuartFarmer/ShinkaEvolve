@@ -13,7 +13,8 @@ import warnings
 from typing import Any, Callable, Optional, Tuple
 
 from .archive_policy import create_archive_policy
-from .repository import ProgramRepository
+from shinka.controllers import ProgramController
+from .connector import DatabaseConnector
 from shinka.core.search_policies import ParentSelector as RepositoryParentSelector
 
 logger = logging.getLogger(__name__)
@@ -59,7 +60,7 @@ class CombinedParentSelector:
             "CombinedParentSelector is deprecated. Use shinka.core.search_policies.ParentSelector."
         )
 
-    def _repository(self) -> ProgramRepository:
+    def _repository(self) -> ProgramController:
         if not self.db_path:
             raise RuntimeError(
                 "Legacy CombinedParentSelector requires config.db_path for repository-backed sampling."
@@ -70,7 +71,13 @@ class CombinedParentSelector:
             DeprecationWarning,
             stacklevel=2,
         )
-        return ProgramRepository(self.db_path, num_islands=self.num_islands, read_only=True)
+        return ProgramController(
+            DatabaseConnector.open(
+                db_path=self.db_path,
+                num_islands=self.num_islands,
+                read_only=True,
+            )
+        )
 
     def has_correct_programs(self, island_idx: Optional[int] = None) -> bool:
         repository = self._repository()

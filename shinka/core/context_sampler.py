@@ -6,7 +6,7 @@ This module owns the first step in the proposal pipeline:
 `sample context -> build prompt -> ...`
 
 It composes smaller policy/services:
-- `ProgramRepository` for persisted state
+- `ProgramController` for persisted state
 - `ArchivePolicy` for computed archive membership
 - `ParentSelector` for lineage choice
 - `InspirationSelector` for prompt conditioning
@@ -25,9 +25,10 @@ from typing import List, Optional
 import numpy as np
 
 from shinka.core.search_policies import InspirationSelector, ParentSelector
+from shinka.controllers import ProgramController
 from shinka.controllers.types import Island
+from shinka.database.connector import DatabaseConnector
 from shinka.database.program import Program
-from shinka.database.repository import ProgramRepository
 from shinka.database.archive_policy import ArchivePolicy, create_archive_policy
 
 
@@ -52,7 +53,7 @@ class ContextSampler:
 
     def __init__(
         self,
-        repository: ProgramRepository,
+        repository: ProgramController,
         *,
         archive_policy: Optional[ArchivePolicy] = None,
         parent_selector: Optional[ParentSelector] = None,
@@ -358,10 +359,12 @@ class AsyncContextSampler:
         with_fix_mode: bool = True,
     ) -> SampledContext:
         async with self._lock:
-            repository = ProgramRepository(
-                self.db_path,
-                num_islands=self.num_islands,
-                read_only=True,
+            repository = ProgramController(
+                DatabaseConnector.open(
+                    db_path=self.db_path,
+                    num_islands=self.num_islands,
+                    read_only=True,
+                )
             )
             try:
                 sampler = ContextSampler(

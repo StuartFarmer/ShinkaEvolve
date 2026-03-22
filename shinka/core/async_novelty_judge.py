@@ -9,7 +9,8 @@ from typing import List, Optional, Dict, Any, Tuple
 from .novelty_judge import NoveltyJudge
 from ..llm import AsyncLLMClient
 from ..database import Program
-from ..database.repository import ProgramRepository
+from shinka.controllers import ProgramController
+from ..database.connector import DatabaseConnector
 from ..database.similarity_service import SimilarityService
 
 logger = logging.getLogger(__name__)
@@ -212,10 +213,12 @@ class AsyncNoveltyJudge:
     ) -> List[float]:
         if self.db_path is None:
             return []
-        repository = ProgramRepository(
-            self.db_path,
-            num_islands=self.num_islands,
-            read_only=True,
+        repository = ProgramController(
+            DatabaseConnector.open(
+                db_path=self.db_path,
+                num_islands=self.num_islands,
+                read_only=True,
+            )
         )
         try:
             return SimilarityService(repository).compute_similarity(
@@ -230,10 +233,12 @@ class AsyncNoveltyJudge:
     ) -> Optional[Program]:
         if self.db_path is None:
             return None
-        repository = ProgramRepository(
-            self.db_path,
-            num_islands=self.num_islands,
-            read_only=True,
+        repository = ProgramController(
+            DatabaseConnector.open(
+                db_path=self.db_path,
+                num_islands=self.num_islands,
+                read_only=True,
+            )
         )
         try:
             return SimilarityService(repository).get_most_similar_program(

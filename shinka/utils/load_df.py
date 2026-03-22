@@ -4,7 +4,8 @@ import sqlite3
 from pathlib import Path
 from typing import Optional, Tuple, Union
 
-from shinka.database import ProgramRepository
+from shinka.controllers import ProgramController
+from shinka.database.connector import DatabaseConnector
 
 
 def load_programs_to_df(
@@ -47,7 +48,9 @@ def load_programs_to_df(
     conn = None
     repo = None
     try:
-        repo = ProgramRepository(str(db_file), read_only=True)
+        repo = ProgramController(
+            DatabaseConnector.open(db_path=str(db_file), read_only=True)
+        )
         programs = repo.list_all()
 
         if not programs:

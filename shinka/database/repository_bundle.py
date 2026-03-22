@@ -2,13 +2,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 from shinka.controllers.database_controller import DatabaseController
 from .connector import DatabaseConnector
-
-if TYPE_CHECKING:
-    from .repository import ProgramRepository
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +28,6 @@ class RepositoryBundle:
     num_islands: int
     read_only: bool
     connector: DatabaseConnector
-    programs: "ProgramRepository"
     controller: DatabaseController
 
     @classmethod
@@ -43,28 +38,21 @@ class RepositoryBundle:
         num_islands: int = 2,
         read_only: bool = False,
     ) -> "RepositoryBundle":
-        from .repository import ProgramRepository
-
         connector = DatabaseConnector.open(
             db_path=db_path,
             num_islands=num_islands,
             read_only=read_only,
         )
-        programs = ProgramRepository.from_existing_connection(
-            db_path=db_path,
-            num_islands=num_islands,
-            conn=connector.conn,
-            cursor=connector.cursor,
-            read_only=read_only,
-            ensure_schema=not read_only,
-        )
+        controller = DatabaseController(connector)
+        if not read_only:
+            controller.programs._store._ensure_schema()
+            controller.programs._store._load_metadata()
         return cls(
             db_path=db_path,
             num_islands=num_islands,
             read_only=read_only,
             connector=connector,
-            programs=programs,
-            controller=DatabaseController(connector),
+            controller=controller,
         )
 
     @property
@@ -79,5 +67,9 @@ class RepositoryBundle:
     def inspirations(self):
         return self.controller.inspirations
 
+    @property
+    def programs(self):
+        return self.controller.programs
+
     def close(self) -> None:
-        self.programs.close()
+        self.controller.programs.close()

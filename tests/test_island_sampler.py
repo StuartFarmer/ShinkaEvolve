@@ -2,7 +2,7 @@
 
 import tempfile
 from pathlib import Path
-from shinka.database import ProgramRepository, Program
+from shinka.database import Program
 from shinka.database.island_sampler import create_island_sampler
 from shinka.database.archive_policy import create_archive_policy
 from shinka.database.islands import CombinedIslandManager

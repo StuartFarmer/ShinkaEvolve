@@ -4,7 +4,9 @@ import time
 import uuid
 
 from shinka.core.context_sampler import ContextSampler, SampledContext
-from shinka.database import InspirationUse, Program, ProgramRepository
+from shinka.controllers import InspirationUse, ProgramController
+from shinka.database import Program
+from shinka.database.connector import DatabaseConnector
 from shinka.database.archive_policy import FitnessArchivePolicy
 
 
@@ -34,7 +36,8 @@ def make_program(
 
 def test_program_repository_roundtrip_and_queries(tmp_path):
     db_path = tmp_path / "programs.sqlite"
-    repo = ProgramRepository(str(db_path), num_islands=2)
+    connector = DatabaseConnector.open(db_path=str(db_path), num_islands=2)
+    repo = ProgramController(connector)
 
     root = make_program(generation=0, score=1.0, correct=True, island_idx=0, timestamp=1.0)
     child = make_program(
@@ -80,7 +83,8 @@ def test_program_repository_roundtrip_and_queries(tmp_path):
 
 def test_fitness_archive_policy_recomputes_from_programs(tmp_path):
     db_path = tmp_path / "programs.sqlite"
-    repo = ProgramRepository(str(db_path), num_islands=1)
+    connector = DatabaseConnector.open(db_path=str(db_path), num_islands=1)
+    repo = ProgramController(connector)
 
     p1 = make_program(generation=0, score=1.0, correct=True, island_idx=0, timestamp=1.0)
     p2 = make_program(generation=1, score=4.0, correct=True, island_idx=0, timestamp=2.0)
@@ -98,7 +102,8 @@ def test_fitness_archive_policy_recomputes_from_programs(tmp_path):
 
 def test_program_repository_persists_inspirations_in_join_table(tmp_path):
     db_path = tmp_path / "programs.sqlite"
-    repo = ProgramRepository(str(db_path), num_islands=1)
+    connector = DatabaseConnector.open(db_path=str(db_path), num_islands=1)
+    repo = ProgramController(connector)
 
     source_a = make_program(generation=0, score=1.0, correct=True, island_idx=0, timestamp=1.0)
     source_b = make_program(generation=1, score=2.0, correct=True, island_idx=0, timestamp=2.0)
@@ -158,7 +163,8 @@ def test_program_repository_persists_inspirations_in_join_table(tmp_path):
 
 def test_context_sampler_uses_repository_backed_archive_and_parent_selection(tmp_path):
     db_path = tmp_path / "programs.sqlite"
-    repo = ProgramRepository(str(db_path), num_islands=1)
+    connector = DatabaseConnector.open(db_path=str(db_path), num_islands=1)
+    repo = ProgramController(connector)
 
     p0 = make_program(generation=0, score=1.0, correct=True, island_idx=0, timestamp=1.0)
     p1 = make_program(generation=1, score=2.0, correct=True, island_idx=0, timestamp=2.0)
@@ -191,7 +197,8 @@ def test_context_sampler_uses_repository_backed_archive_and_parent_selection(tmp
 
 def test_context_sampler_fix_mode_returns_incorrect_parent_with_ancestry(tmp_path):
     db_path = tmp_path / "programs.sqlite"
-    repo = ProgramRepository(str(db_path), num_islands=1)
+    connector = DatabaseConnector.open(db_path=str(db_path), num_islands=1)
+    repo = ProgramController(connector)
 
     root = make_program(generation=0, score=0.0, correct=False, island_idx=0, timestamp=1.0)
     child = make_program(

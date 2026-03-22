@@ -24,7 +24,8 @@ import urllib.parse
 import webbrowser
 from typing import Optional, Dict, Any, Tuple
 
-from shinka.database import ProgramRepository
+from shinka.controllers import ProgramController
+from shinka.database.connector import DatabaseConnector
 from shinka.database import SystemPromptConfig, SystemPromptDatabase
 
 # We'll use a simple text-to-PDF approach instead of complex dependencies
@@ -229,7 +230,9 @@ class DatabaseRequestHandler(http.server.SimpleHTTPRequestHandler):
         for i in range(max_retries):
             db = None
             try:
-                db = ProgramRepository(abs_db_path, read_only=True)
+                db = ProgramController(
+                    DatabaseConnector.open(db_path=abs_db_path, read_only=True)
+                )
 
                 # Set WAL mode compatible settings for read-only connections
                 # Longer busy_timeout for concurrent access during evolution
@@ -318,7 +321,9 @@ class DatabaseRequestHandler(http.server.SimpleHTTPRequestHandler):
         for i in range(max_retries):
             db = None
             try:
-                db = ProgramRepository(abs_db_path, read_only=True)
+                db = ProgramController(
+                    DatabaseConnector.open(db_path=abs_db_path, read_only=True)
+                )
 
                 if db.cursor:
                     db.cursor.execute("PRAGMA busy_timeout = 30000;")
@@ -381,7 +386,9 @@ class DatabaseRequestHandler(http.server.SimpleHTTPRequestHandler):
         for i in range(max_retries):
             db = None
             try:
-                db = ProgramRepository(abs_db_path, read_only=True)
+                db = ProgramController(
+                    DatabaseConnector.open(db_path=abs_db_path, read_only=True)
+                )
 
                 if db.cursor:
                     db.cursor.execute("PRAGMA busy_timeout = 30000;")
@@ -443,7 +450,9 @@ class DatabaseRequestHandler(http.server.SimpleHTTPRequestHandler):
         for i in range(max_retries):
             db = None
             try:
-                db = ProgramRepository(abs_db_path, read_only=True)
+                db = ProgramController(
+                    DatabaseConnector.open(db_path=abs_db_path, read_only=True)
+                )
 
                 if db.cursor:
                     db.cursor.execute("PRAGMA busy_timeout = 30000;")

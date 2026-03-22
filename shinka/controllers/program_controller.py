@@ -1,63 +1,81 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
-from typing import Any, Dict, Optional
-
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
 from shinka.database.connector import DatabaseConnector
-from shinka.database.models import ProgramEvaluationRecord, ProgramRecord
+from .embedding_controller import EmbeddingController
+from .inspiration_controller import InspirationController
+from .metadata_controller import MetadataController
+from .run_state_controller import RunStateController
 
 
 class ProgramController:
-    """Program-centric interaction layer over ORM models."""
+    """Public CRUD/query controller facade for programs."""
 
     def __init__(self, connector: DatabaseConnector) -> None:
+        from shinka.database.repository import ProgramRepository
+
         self.connector = connector
-        self._session_factory = connector.SessionLocal
+        self.run_state = RunStateController(connector)
+        self.metadata = MetadataController(connector)
+        self.inspirations = InspirationController(connector)
+        self.embeddings = EmbeddingController(connector)
+        self._store = ProgramRepository.from_existing_connection(
+            db_path=connector.db_path,
+            num_islands=connector.num_islands,
+            conn=connector.conn,
+            cursor=connector.cursor,
+            read_only=connector.read_only,
+            ensure_schema=not connector.read_only,
+        )
 
-    @contextmanager
-    def _managed_session(self, session: Session | None = None):
-        if session is not None:
-            yield session
+    def get_metadata(self, key: str, default=None):
+        if key in RunStateController.SUPPORTED_KEYS:
+            return self.run_state.get(key, default)
+        return self.metadata.get(key, default)
+
+    def set_metadata(self, key: str, value):
+        if key in RunStateController.SUPPORTED_KEYS:
+            self.run_state.set(key, value)
             return
-        managed = self._session_factory()
-        try:
-            yield managed
-        finally:
-            managed.close()
+        self.metadata.set(key, value)
 
-    @staticmethod
-    def _row_dict(record: ProgramRecord) -> Dict[str, Any]:
-        return {
-            column.name: getattr(record, column.name)
-            for column in ProgramRecord.__table__.columns
-        }
+    def get_inspiration_uses(self, child_program_id: str, *, role=None):
+        inspirations = self.inspirations.list_for_child(child_program_id)
+        if role is not None:
+            inspirations = [insp for insp in inspirations if insp.role == role]
+        return inspirations
 
-    def get_initial_program_row(self) -> Optional[Dict[str, Any]]:
-        with self._managed_session() as session:
-            record = session.scalar(
-                select(ProgramRecord)
-                .where(
-                    ProgramRecord.generation == 0,
-                    ProgramRecord.parent_id.is_(None),
-                )
-                .order_by(ProgramRecord.timestamp.asc())
-                .limit(1)
-            )
-        return None if record is None else self._row_dict(record)
+    def get_inspiration_source_ids(self, child_program_id: str, *, role=None):
+        return self.inspirations.list_sources_for_child(child_program_id, role=role)
 
-    def get_best_program_row(self) -> Optional[Dict[str, Any]]:
-        with self._managed_session() as session:
-            record = session.scalar(
-                select(ProgramRecord)
-                .join(
-                    ProgramEvaluationRecord,
-                    ProgramEvaluationRecord.program_id == ProgramRecord.id,
-                )
-                .where(ProgramEvaluationRecord.correct.is_(True))
-                .order_by(ProgramEvaluationRecord.combined_score.desc())
-                .limit(1)
-            )
-        return None if record is None else self._row_dict(record)
+    def get_inspired_child_ids(self, source_program_id: str, *, role=None):
+        return self.inspirations.list_children_for_source(source_program_id, role=role)
+
+    def count_inspiration_usage_by_source(self, source_program_id: str, *, role=None):
+        return self.inspirations.count_usage_by_source(source_program_id, role=role)
+
+    def count_inspiration_usage_by_role(self, role: str) -> int:
+        return self.inspirations.count_usage_by_role(role)
+
+    def list_embeddings_by_island(self, island_idx: int):
+        return self.embeddings.list_by_island(island_idx)
+
+    def list_all_embeddings(self):
+        return self.embeddings.list_all()
+
+    def update_embedding_features(
+        self,
+        *,
+        program_id: str,
+        embedding_pca_2d,
+        embedding_pca_3d,
+        embedding_cluster_id: int,
+    ):
+        self.embeddings.update_features(
+            program_id=program_id,
+            embedding_pca_2d=embedding_pca_2d,
+            embedding_pca_3d=embedding_pca_3d,
+            embedding_cluster_id=embedding_cluster_id,
+        )
+
+    def __getattr__(self, name):
+        return getattr(self._store, name)

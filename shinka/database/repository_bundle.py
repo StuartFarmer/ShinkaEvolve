@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .dbase import DatabaseConfig
     from .repository import ProgramRepository
 
 logger = logging.getLogger(__name__)
@@ -39,23 +37,12 @@ class RepositoryBundle:
     @classmethod
     def open(
         cls,
-        config: "DatabaseConfig" | None = None,
         *,
         db_path: str | None = None,
         num_islands: int = 2,
         read_only: bool = False,
     ) -> "RepositoryBundle":
         from .repository import ProgramRepository
-
-        if config is not None:
-            warnings.warn(
-                "Passing DatabaseConfig into RepositoryBundle.open() is deprecated; "
-                "pass db_path/num_islands explicitly.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            db_path = config.db_path
-            num_islands = config.num_islands
 
         conn = cls._connect(db_path=db_path, read_only=read_only)
         conn.row_factory = sqlite3.Row

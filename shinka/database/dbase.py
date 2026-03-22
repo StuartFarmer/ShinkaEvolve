@@ -128,15 +128,6 @@ class DatabaseConfig:
     # Weights represent relative importance after rank normalization
     archive_criteria: Dict[str, float] = field(default_factory=default_archive_criteria)
 
-    def __post_init__(self) -> None:
-        warnings.warn(
-            "DatabaseConfig is deprecated as a constructor surface for runtime/storage "
-            "classes. Pass explicit init args instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-
-
 def db_retry(max_retries=5, initial_delay=0.1, backoff_factor=2):
     """
     A decorator to retry database operations on specific SQLite errors.
@@ -307,8 +298,6 @@ class ProgramDatabase:
 
     def __init__(
         self,
-        config: Optional[DatabaseConfig] = None,
-        *,
         db_path: Optional[str] = None,
         num_islands: int = 2,
         archive_size: int = 40,
@@ -334,36 +323,6 @@ class ProgramDatabase:
         embedding_model: str = "text-embedding-3-small",
         read_only: bool = False,
     ):
-        if config is not None:
-            warnings.warn(
-                "Passing DatabaseConfig into ProgramDatabase() is deprecated; "
-                "pass explicit init args instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            db_path = config.db_path
-            num_islands = config.num_islands
-            archive_size = config.archive_size
-            migration_interval = config.migration_interval
-            migration_rate = config.migration_rate
-            island_elitism = config.island_elitism
-            island_selection_strategy = config.island_selection_strategy
-            enable_dynamic_islands = config.enable_dynamic_islands
-            stagnation_threshold = config.stagnation_threshold
-            island_spawn_strategy = config.island_spawn_strategy
-            island_spawn_subtree_size = config.island_spawn_subtree_size
-            parent_selection_strategy = config.parent_selection_strategy
-            exploitation_alpha = config.exploitation_alpha
-            exploitation_ratio = config.exploitation_ratio
-            parent_selection_lambda = config.parent_selection_lambda
-            num_beams = config.num_beams
-            archive_selection_strategy = config.archive_selection_strategy
-            archive_criteria = config.archive_criteria
-            elite_selection_ratio = config.elite_selection_ratio
-            num_archive_inspirations = config.num_archive_inspirations
-            num_top_k_inspirations = config.num_top_k_inspirations
-            enforce_island_separation = config.enforce_island_separation
-
         self.db_path = db_path
         self.num_islands = num_islands
         self.archive_size = archive_size
@@ -448,39 +407,6 @@ class ProgramDatabase:
         self.program_repository = bundle.programs
         self.metadata_repo = bundle.metadata
         self.island_repo = bundle.islands
-
-    @property
-    def config(self) -> DatabaseConfig:
-        warnings.warn(
-            "ProgramDatabase.config is deprecated; use explicit ProgramDatabase "
-            "attributes instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return DatabaseConfig(
-            db_path=self.db_path,
-            num_islands=self.num_islands,
-            archive_size=self.archive_size,
-            elite_selection_ratio=self.elite_selection_ratio,
-            num_archive_inspirations=self.num_archive_inspirations,
-            num_top_k_inspirations=self.num_top_k_inspirations,
-            migration_interval=self.migration_interval,
-            migration_rate=self.migration_rate,
-            island_elitism=self.island_elitism,
-            enforce_island_separation=self.enforce_island_separation,
-            island_selection_strategy=self.island_selection_strategy,
-            enable_dynamic_islands=self.enable_dynamic_islands,
-            stagnation_threshold=self.stagnation_threshold,
-            island_spawn_strategy=self.island_spawn_strategy,
-            island_spawn_subtree_size=self.island_spawn_subtree_size,
-            parent_selection_strategy=self.parent_selection_strategy,
-            exploitation_alpha=self.exploitation_alpha,
-            exploitation_ratio=self.exploitation_ratio,
-            parent_selection_lambda=self.parent_selection_lambda,
-            num_beams=self.num_beams,
-            archive_selection_strategy=self.archive_selection_strategy,
-            archive_criteria=self.archive_criteria,
-        )
 
     def _initialize_runtime_services(self) -> None:
         self.island_manager = CombinedIslandManager(

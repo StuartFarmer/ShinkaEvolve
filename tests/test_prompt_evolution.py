@@ -328,7 +328,7 @@ class TestSystemPromptDatabase:
         temp_db.save()
 
         # Get the db_path before closing
-        db_path = temp_db.config.db_path
+        db_path = temp_db.db_path
 
         temp_db.close()
 

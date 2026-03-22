@@ -4,6 +4,7 @@ import ast
 import pathlib
 from pathlib import Path
 import inspect
+from dataclasses import asdict, is_dataclass
 from functools import wraps
 from typing import Optional, Union
 import os
@@ -11,6 +12,14 @@ import sys
 from omegaconf import DictConfig, OmegaConf
 
 from shinka.configs import config_root
+
+
+def _to_plain_dict(obj) -> dict:
+    if isinstance(obj, DictConfig):
+        return OmegaConf.to_container(obj, resolve=True)
+    if is_dataclass(obj):
+        return asdict(obj)
+    return dict(obj)
 
 
 def load_hydra_config(
@@ -73,7 +82,7 @@ def build_cfgs_from_python(*launcher_args, **launcher_kwargs):
     job_cfg = hydra.utils.instantiate(cfg.job_config)
     db_cfg = hydra.utils.instantiate(cfg.db_config)
     evo_cfg = hydra.utils.instantiate(cfg.evo_config)
-    return job_cfg, db_cfg, evo_cfg, cfg
+    return job_cfg, _to_plain_dict(db_cfg), evo_cfg, cfg
 
 
 def add_evolve_markers(

@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict
 
-from shinka.database import DatabaseConfig, Program, ProgramDatabase, ProgramRepository
+from shinka.database import Program, ProgramDatabase, ProgramRepository
 
 
 # Allow running this file directly with `python tests/test_async_complexity_1000.py`
@@ -56,7 +56,8 @@ async def _run_single_additions_with_complexity() -> float:
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "async_single.db"
         sync_db = ProgramDatabase(
-            config=DatabaseConfig(db_path=str(db_path), num_islands=1),
+            db_path=str(db_path),
+            num_islands=1,
             embedding_model="",
         )
         async_db = AsyncProgramDatabase(
@@ -73,10 +74,7 @@ async def _run_single_additions_with_complexity() -> float:
                 await async_db.add_program_async(program=build_program("single", i))
             total_time = time.time() - start_time
 
-            repo = ProgramRepository(
-                config=DatabaseConfig(db_path=str(db_path), num_islands=1),
-                read_only=True,
-            )
+            repo = ProgramRepository(str(db_path), num_islands=1, read_only=True)
             sample_program = repo.get(f"single-{NUM_PROGRAMS // 2:04d}")
             repo.close()
             assert sample_program is not None
@@ -96,7 +94,8 @@ async def _run_concurrent_additions_with_complexity() -> float:
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "async_concurrent.db"
         sync_db = ProgramDatabase(
-            config=DatabaseConfig(db_path=str(db_path), num_islands=1),
+            db_path=str(db_path),
+            num_islands=1,
             embedding_model="",
         )
         async_db = AsyncProgramDatabase(
@@ -121,10 +120,7 @@ async def _run_concurrent_additions_with_complexity() -> float:
             await asyncio.gather(*tasks)
             total_time = time.time() - start_time
 
-            repo = ProgramRepository(
-                config=DatabaseConfig(db_path=str(db_path), num_islands=1),
-                read_only=True,
-            )
+            repo = ProgramRepository(str(db_path), num_islands=1, read_only=True)
             sample_program = repo.get(f"conc-{(NUM_PROGRAMS * 3) // 4:04d}")
             repo.close()
             assert sample_program is not None

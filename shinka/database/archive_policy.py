@@ -10,13 +10,12 @@ from __future__ import annotations
 
 import logging
 import random
-import warnings
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from .dbase import DatabaseConfig, Program
+from .dbase import Program
 
 logger = logging.getLogger(__name__)
 
@@ -26,19 +25,9 @@ class ArchivePolicy(ABC):
 
     def __init__(
         self,
-        archive_size: int | DatabaseConfig,
+        archive_size: int,
         archive_criteria: Optional[Dict[str, float]] = None,
     ):
-        if isinstance(archive_size, DatabaseConfig):
-            warnings.warn(
-                "Passing DatabaseConfig into ArchivePolicy() is deprecated; "
-                "pass archive_size/archive_criteria explicitly.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            config = archive_size
-            archive_size = config.archive_size
-            archive_criteria = config.archive_criteria
         self.archive_size = archive_size
         self.archive_criteria = archive_criteria or {"combined_score": 1.0}
 
@@ -266,24 +255,11 @@ class CrowdingArchivePolicy(ArchivePolicy):
 
 
 def create_archive_policy(
-    config: Optional[DatabaseConfig] = None,
-    *,
     archive_selection_strategy: str = "fitness",
     archive_size: int = 40,
     archive_criteria: Optional[Dict[str, float]] = None,
 ) -> ArchivePolicy:
     """Factory for the configured computed archive policy."""
-    if config is not None:
-        warnings.warn(
-            "Passing DatabaseConfig into create_archive_policy() is deprecated; "
-            "pass archive settings explicitly.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        archive_selection_strategy = config.archive_selection_strategy
-        archive_size = config.archive_size
-        archive_criteria = config.archive_criteria
-
     criteria = archive_criteria or {"combined_score": 1.0}
     strategy = archive_selection_strategy
     if strategy == "crowding":

@@ -229,6 +229,7 @@ class SystemPromptDatabase:
         read_only: bool = False,
     ):
         self.config = config
+        self.db_path = config.db_path
         self.conn: Optional[sqlite3.Connection] = None
         self.cursor: Optional[sqlite3.Cursor] = None
         self.read_only = read_only
@@ -236,7 +237,7 @@ class SystemPromptDatabase:
         self.last_generation: int = 0
         self.best_prompt_id: Optional[str] = None
 
-        db_path_str = getattr(self.config, "db_path", None)
+        db_path_str = self.db_path
 
         if db_path_str:
             db_file = Path(db_path_str).resolve()

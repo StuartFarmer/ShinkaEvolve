@@ -18,7 +18,6 @@ import math
 import sqlite3
 import time
 import uuid
-import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -29,7 +28,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from .complexity import analyze_code_metrics
-from .dbase import DatabaseConfig, Program
+from .dbase import Program
 from .island_repository import Island, IslandRepository
 from .metadata_repository import MetadataRepository
 from .models import Base, ProgramRecord
@@ -72,27 +71,13 @@ class ProgramCountSnapshot:
 class ProgramRepository:
     def __init__(
         self,
-        db_path: Optional[str] | DatabaseConfig = None,
+        db_path: Optional[str] = None,
         *,
         num_islands: int = 2,
         read_only: bool = False,
-        config: Optional[DatabaseConfig] = None,
     ):
-        if config is None and isinstance(db_path, DatabaseConfig):
-            config = db_path
-        if config is not None:
-            warnings.warn(
-                "Passing DatabaseConfig into ProgramRepository() is deprecated; "
-                "pass db_path/num_islands explicitly.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            db_path = config.db_path
-            num_islands = config.num_islands
-
         self.db_path = db_path
         self.num_islands = num_islands
-        self._legacy_config = config
         self.read_only = read_only
         self.conn: sqlite3.Connection | None = None
         self.cursor: sqlite3.Cursor | None = None
@@ -107,22 +92,6 @@ class ProgramRepository:
         self._connect()
         self._ensure_schema()
         self._load_metadata()
-
-    @classmethod
-    def from_config(
-        cls,
-        config: DatabaseConfig,
-        *,
-        embedding_model: str = "text-embedding-3-small",
-        read_only: bool = False,
-    ) -> ProgramRepository:
-        _ = embedding_model
-        return cls(
-            db_path=config.db_path,
-            num_islands=config.num_islands,
-            read_only=read_only,
-            config=config,
-        )
 
     @classmethod
     def from_db_path(
@@ -148,7 +117,6 @@ class ProgramRepository:
         repo = cls.__new__(cls)
         repo.db_path = db_path
         repo.num_islands = num_islands
-        repo._legacy_config = None
         repo.read_only = read_only
         repo.conn = conn
         repo.cursor = cursor
@@ -223,19 +191,6 @@ class ProgramRepository:
         self.island_repo = IslandRepository(
             conn=self.conn,
             cursor=self.cursor,
-            num_islands=self.num_islands,
-        )
-
-    @property
-    def config(self) -> DatabaseConfig:
-        warnings.warn(
-            "ProgramRepository.config is deprecated; read repository attributes "
-            "directly instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return DatabaseConfig(
-            db_path=self.db_path,
             num_islands=self.num_islands,
         )
 

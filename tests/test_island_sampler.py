@@ -2,7 +2,7 @@
 
 import tempfile
 from pathlib import Path
-from shinka.database import DatabaseConfig, ProgramDatabase, Program
+from shinka.database import ProgramDatabase, Program
 
 
 def test_island_samplers():
@@ -17,13 +17,13 @@ def test_island_samplers():
         for strategy in strategies:
             print(f"\n=== Testing {strategy} strategy ===")
 
-            config = DatabaseConfig(
+            db = ProgramDatabase(
                 db_path=str(db_path),
                 num_islands=3,
                 island_selection_strategy=strategy,
+                embedding_model="",
+                read_only=False,
             )
-
-            db = ProgramDatabase(config=config, embedding_model="", read_only=False)
 
             # Add some test programs to different islands
             for island_idx in range(3):

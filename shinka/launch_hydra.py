@@ -1,10 +1,19 @@
 #!/usr/bin/env python3
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
 import hydra
 from omegaconf import DictConfig, OmegaConf
 from shinka.core import ShinkaEvolveRunner
+
+
+def _to_plain_dict(obj) -> dict:
+    if isinstance(obj, DictConfig):
+        return OmegaConf.to_container(obj, resolve=True)
+    if is_dataclass(obj):
+        return asdict(obj)
+    return dict(obj)
 
 
 def run_with_cfg(cfg: DictConfig) -> None:
@@ -17,13 +26,14 @@ def run_with_cfg(cfg: DictConfig) -> None:
 
     job_cfg = hydra.utils.instantiate(cfg.job_config)
     db_cfg = hydra.utils.instantiate(cfg.db_config)
+    db_values = _to_plain_dict(db_cfg)
     evo_cfg = hydra.utils.instantiate(cfg.evo_config)
     max_evaluation_jobs = int(cfg.get("max_evaluation_jobs", 2))
 
     evo_runner = ShinkaEvolveRunner(
         evo_config=evo_cfg,
         job_config=job_cfg,
-        db_config=db_cfg,
+        **db_values,
         verbose=cfg.verbose,
         max_evaluation_jobs=max_evaluation_jobs,
         max_proposal_jobs=evo_cfg.max_proposal_jobs,

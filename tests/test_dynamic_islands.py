@@ -2,7 +2,7 @@
 
 import tempfile
 from pathlib import Path
-from shinka.database import DatabaseConfig, ProgramDatabase, Program
+from shinka.database import ProgramDatabase, Program
 
 
 def test_stagnation_detection():
@@ -11,14 +11,14 @@ def test_stagnation_detection():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "test_stagnation.db"
 
-        config = DatabaseConfig(
+        db = ProgramDatabase(
             db_path=str(db_path),
             num_islands=2,
             enable_dynamic_islands=True,
             stagnation_threshold=5,  # Very short threshold for testing
+            embedding_model="",
+            read_only=False,
         )
-
-        db = ProgramDatabase(config=config, embedding_model="", read_only=False)
 
         # Add initial program (generation 0)
         initial_program = Program(
@@ -53,14 +53,14 @@ def test_dynamic_island_spawning():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "test_spawn.db"
 
-        config = DatabaseConfig(
+        db = ProgramDatabase(
             db_path=str(db_path),
             num_islands=2,
             enable_dynamic_islands=True,
             stagnation_threshold=3,  # Very short threshold for testing
+            embedding_model="",
+            read_only=False,
         )
-
-        db = ProgramDatabase(config=config, embedding_model="", read_only=False)
 
         # Add initial program (generation 0)
         initial_program = Program(
@@ -100,8 +100,8 @@ def test_dynamic_island_spawning():
 
         # The new island should have the initial program
         spawned_island_idx = max(final_islands.keys())
-        assert spawned_island_idx >= config.num_islands, (
-            f"Spawned island index {spawned_island_idx} should be >= configured num_islands {config.num_islands}"
+        assert spawned_island_idx >= db.num_islands, (
+            f"Spawned island index {spawned_island_idx} should be >= configured num_islands {db.num_islands}"
         )
 
         db.close()
@@ -114,14 +114,14 @@ def test_no_spawning_when_disabled():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "test_disabled.db"
 
-        config = DatabaseConfig(
+        db = ProgramDatabase(
             db_path=str(db_path),
             num_islands=2,
             enable_dynamic_islands=False,  # Disabled
             stagnation_threshold=3,
+            embedding_model="",
+            read_only=False,
         )
-
-        db = ProgramDatabase(config=config, embedding_model="", read_only=False)
 
         # Add initial program
         initial_program = Program(
@@ -165,14 +165,14 @@ def test_stagnation_reset_on_improvement():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "test_reset.db"
 
-        config = DatabaseConfig(
+        db = ProgramDatabase(
             db_path=str(db_path),
             num_islands=2,
             enable_dynamic_islands=True,
             stagnation_threshold=5,
+            embedding_model="",
+            read_only=False,
         )
-
-        db = ProgramDatabase(config=config, embedding_model="", read_only=False)
 
         # Add initial program
         initial_program = Program(
@@ -239,15 +239,15 @@ def test_spawn_strategies():
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / f"test_spawn_{strategy}.db"
 
-            config = DatabaseConfig(
+            db = ProgramDatabase(
                 db_path=str(db_path),
                 num_islands=2,
                 enable_dynamic_islands=True,
                 stagnation_threshold=3,
                 island_spawn_strategy=strategy,
+                embedding_model="",
+                read_only=False,
             )
-
-            db = ProgramDatabase(config=config, embedding_model="", read_only=False)
 
             # Add initial program (generation 0)
             initial_program = Program(

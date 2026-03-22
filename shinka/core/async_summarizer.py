@@ -304,7 +304,8 @@ class AsyncMetaSummarizer:
         self,
         results_dir: str,
         best_program: Optional[Program] = None,
-        db_config=None,
+        db_path: Optional[str] = None,
+        num_islands: int = 2,
     ) -> tuple[bool, float]:
         """Async version of perform_final_summary.
 
@@ -331,14 +332,16 @@ class AsyncMetaSummarizer:
             logger.info(f"Final meta summary completed (cost: ${meta_cost:.4f})")
 
             # Store the final meta cost in the best program's metadata
-            if meta_cost > 0 and best_program and db_config:
+            if meta_cost > 0 and best_program and db_path:
                 try:
-                    import json
-
                     def update_metadata():
-                        from shinka.database import ProgramDatabase
+                        from shinka.database import ProgramRepository
 
-                        thread_db = ProgramDatabase(db_config)
+                        thread_repo = ProgramRepository(
+                            db_path,
+                            num_islands=num_islands,
+                            read_only=False,
+                        )
                         try:
                             if best_program.metadata is None:
                                 best_program.metadata = {}
@@ -350,15 +353,12 @@ class AsyncMetaSummarizer:
                             best_program.metadata["meta_cost"] = (
                                 existing_meta_cost + meta_cost
                             )
-
-                            metadata_json = json.dumps(best_program.metadata)
-                            thread_db.cursor.execute(
-                                ("UPDATE programs SET metadata = ? WHERE id = ?"),
-                                (metadata_json, best_program.id),
+                            thread_repo.update_program_metadata(
+                                best_program.id,
+                                best_program.metadata,
                             )
-                            thread_db.conn.commit()
                         finally:
-                            thread_db.close()
+                            thread_repo.close()
 
                     loop = asyncio.get_event_loop()
                     await loop.run_in_executor(None, update_metadata)

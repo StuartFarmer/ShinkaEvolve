@@ -8,6 +8,7 @@ This module remains only for older imports while the migration completes.
 from __future__ import annotations
 
 import logging
+import warnings
 from typing import Any, Callable, List, Literal, Optional
 
 from .archive_policy import create_archive_policy
@@ -31,19 +32,38 @@ class CombinedContextSelector:
         program_from_row_func: Optional[Callable[[Any], Any]] = None,
     ):
         _ = (cursor, conn, get_program_func, best_program_id, get_island_idx_func, program_from_row_func)
-        self.config = config
-        self.selector = RepositoryInspirationSelector(config)
-        self.archive_policy = create_archive_policy(config)
+        self.db_path = getattr(config, "db_path", None)
+        self.num_islands = getattr(config, "num_islands", 2)
+        self.enforce_island_separation = getattr(config, "enforce_island_separation", False)
+        self.elite_selection_ratio = getattr(config, "elite_selection_ratio", 0.3)
+        self.archive_selection_strategy = getattr(config, "archive_selection_strategy", "fitness")
+        self.archive_size = getattr(config, "archive_size", 40)
+        self.archive_criteria = getattr(config, "archive_criteria", {"combined_score": 1.0})
+        self.selector = RepositoryInspirationSelector(
+            enforce_island_separation=self.enforce_island_separation,
+            elite_selection_ratio=self.elite_selection_ratio,
+        )
+        self.archive_policy = create_archive_policy(
+            archive_selection_strategy=self.archive_selection_strategy,
+            archive_size=self.archive_size,
+            archive_criteria=self.archive_criteria,
+        )
         logger.warning(
             "CombinedContextSelector is deprecated. Use shinka.core.search_policies.InspirationSelector."
         )
 
     def _repository(self) -> ProgramRepository:
-        if not getattr(self.config, "db_path", None):
+        if not self.db_path:
             raise RuntimeError(
                 "Legacy CombinedContextSelector requires config.db_path for repository-backed sampling."
             )
-        return ProgramRepository.from_config(self.config, read_only=True)
+        warnings.warn(
+            "CombinedContextSelector is deprecated; use ProgramRepository + "
+            "shinka.core.search_policies.InspirationSelector directly.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return ProgramRepository(self.db_path, num_islands=self.num_islands, read_only=True)
 
     def sample_context(
         self, parent: Any, num_archive: int, num_topk: int

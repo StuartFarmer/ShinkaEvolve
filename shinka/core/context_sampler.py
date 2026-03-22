@@ -25,7 +25,7 @@ from typing import List, Optional
 import numpy as np
 
 from shinka.core.search_policies import InspirationSelector, ParentSelector
-from shinka.database.dbase import Program, DatabaseConfig
+from shinka.database.dbase import Program
 from shinka.database.repository import ProgramRepository
 from shinka.database.island_repository import Island
 from shinka.database.archive_policy import ArchivePolicy, create_archive_policy
@@ -69,38 +69,14 @@ class ContextSampler:
         elite_selection_ratio: float = 0.3,
     ):
         self.repository = repository
-        legacy_config = getattr(repository, "_legacy_config", None)
-
         self.num_islands = (
             repository.num_islands if num_islands is None else num_islands
         )
-        if legacy_config is not None and island_selection_strategy == "uniform":
-            island_selection_strategy = legacy_config.island_selection_strategy
-        if legacy_config is not None and num_archive_inspirations == 1:
-            num_archive_inspirations = legacy_config.num_archive_inspirations
-        if legacy_config is not None and num_top_k_inspirations == 1:
-            num_top_k_inspirations = legacy_config.num_top_k_inspirations
-        if legacy_config is not None and parent_selection_strategy == "weighted":
-            parent_selection_strategy = legacy_config.parent_selection_strategy
-        if legacy_config is not None and exploitation_alpha == 1.0:
-            exploitation_alpha = legacy_config.exploitation_alpha
-        if legacy_config is not None and parent_selection_lambda == 10.0:
-            parent_selection_lambda = legacy_config.parent_selection_lambda
-        if legacy_config is not None and num_beams == 5:
-            num_beams = legacy_config.num_beams
-        if legacy_config is not None and enforce_island_separation is True:
-            enforce_island_separation = legacy_config.enforce_island_separation
-        if legacy_config is not None and elite_selection_ratio == 0.3:
-            elite_selection_ratio = legacy_config.elite_selection_ratio
 
         self.island_selection_strategy = island_selection_strategy
         self.num_archive_inspirations = num_archive_inspirations
         self.num_top_k_inspirations = num_top_k_inspirations
-        self.archive_policy = archive_policy or (
-            create_archive_policy(legacy_config)
-            if legacy_config is not None
-            else create_archive_policy()
-        )
+        self.archive_policy = archive_policy or create_archive_policy()
         self.parent_selector = parent_selector or ParentSelector(
             parent_selection_strategy=parent_selection_strategy,
             exploitation_alpha=exploitation_alpha,
@@ -345,7 +321,6 @@ class AsyncContextSampler:
 
     def __init__(
         self,
-        db_config: Optional[DatabaseConfig] = None,
         *,
         db_path: Optional[str] = None,
         num_islands: int = 2,
@@ -359,25 +334,6 @@ class AsyncContextSampler:
         enforce_island_separation: bool = True,
         elite_selection_ratio: float = 0.3,
     ):
-        if db_config is not None:
-            warnings.warn(
-                "Passing DatabaseConfig into AsyncContextSampler() is deprecated; "
-                "pass explicit init args instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            db_path = db_config.db_path
-            num_islands = db_config.num_islands
-            island_selection_strategy = db_config.island_selection_strategy
-            num_archive_inspirations = db_config.num_archive_inspirations
-            num_top_k_inspirations = db_config.num_top_k_inspirations
-            parent_selection_strategy = db_config.parent_selection_strategy
-            exploitation_alpha = db_config.exploitation_alpha
-            parent_selection_lambda = db_config.parent_selection_lambda
-            num_beams = db_config.num_beams
-            enforce_island_separation = db_config.enforce_island_separation
-            elite_selection_ratio = db_config.elite_selection_ratio
-
         self.db_path = db_path
         self.num_islands = num_islands
         self.island_selection_strategy = island_selection_strategy

@@ -36,7 +36,8 @@ class AsyncNoveltyJudge:
         sync_novelty_judge: NoveltyJudge,
         async_llm_client: Optional[AsyncLLMClient] = None,
         *,
-        db_config=None,
+        db_path: Optional[str] = None,
+        num_islands: int = 2,
     ):
         """Initialize with existing sync novelty judge.
 
@@ -46,7 +47,8 @@ class AsyncNoveltyJudge:
         """
         self.sync_judge = sync_novelty_judge
         self.async_llm_client = async_llm_client
-        self.db_config = db_config
+        self.db_path = db_path
+        self.num_islands = num_islands
 
     async def should_check_novelty_async(
         self, code_embedding: List[float], current_gen: int, parent_program: Program, db
@@ -208,9 +210,13 @@ class AsyncNoveltyJudge:
     def _compute_similarity_thread_safe(
         self, code_embedding: List[float], island_idx: int
     ) -> List[float]:
-        if self.db_config is None:
+        if self.db_path is None:
             return []
-        repository = ProgramRepository.from_config(self.db_config, read_only=True)
+        repository = ProgramRepository(
+            self.db_path,
+            num_islands=self.num_islands,
+            read_only=True,
+        )
         try:
             return SimilarityService(repository).compute_similarity(
                 code_embedding,
@@ -222,9 +228,13 @@ class AsyncNoveltyJudge:
     def _get_most_similar_program_thread_safe(
         self, code_embedding: List[float], island_idx: int
     ) -> Optional[Program]:
-        if self.db_config is None:
+        if self.db_path is None:
             return None
-        repository = ProgramRepository.from_config(self.db_config, read_only=True)
+        repository = ProgramRepository(
+            self.db_path,
+            num_islands=self.num_islands,
+            read_only=True,
+        )
         try:
             return SimilarityService(repository).get_most_similar_program(
                 code_embedding,

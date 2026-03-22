@@ -9,6 +9,7 @@ codebase migrates.
 from __future__ import annotations
 
 import logging
+import warnings
 from typing import Any, Callable, Optional, Tuple
 
 from .archive_policy import create_archive_policy
@@ -34,19 +35,42 @@ class CombinedParentSelector:
         get_best_program_func: Optional[Callable[[], Any]] = None,
     ):
         _ = (cursor, conn, get_program_func, best_program_id, beam_search_parent_id, last_iteration, update_metadata_func, get_best_program_func)
-        self.config = config
-        self.selector = RepositoryParentSelector(config)
-        self.archive_policy = create_archive_policy(config)
+        self.db_path = getattr(config, "db_path", None)
+        self.num_islands = getattr(config, "num_islands", 2)
+        self.parent_selection_strategy = getattr(config, "parent_selection_strategy", "weighted")
+        self.exploitation_alpha = getattr(config, "exploitation_alpha", 1.0)
+        self.parent_selection_lambda = getattr(config, "parent_selection_lambda", 10.0)
+        self.num_beams = getattr(config, "num_beams", 5)
+        self.archive_selection_strategy = getattr(config, "archive_selection_strategy", "fitness")
+        self.archive_size = getattr(config, "archive_size", 40)
+        self.archive_criteria = getattr(config, "archive_criteria", {"combined_score": 1.0})
+        self.selector = RepositoryParentSelector(
+            parent_selection_strategy=self.parent_selection_strategy,
+            exploitation_alpha=self.exploitation_alpha,
+            parent_selection_lambda=self.parent_selection_lambda,
+            num_beams=self.num_beams,
+        )
+        self.archive_policy = create_archive_policy(
+            archive_selection_strategy=self.archive_selection_strategy,
+            archive_size=self.archive_size,
+            archive_criteria=self.archive_criteria,
+        )
         logger.warning(
             "CombinedParentSelector is deprecated. Use shinka.core.search_policies.ParentSelector."
         )
 
     def _repository(self) -> ProgramRepository:
-        if not getattr(self.config, "db_path", None):
+        if not self.db_path:
             raise RuntimeError(
                 "Legacy CombinedParentSelector requires config.db_path for repository-backed sampling."
             )
-        return ProgramRepository.from_config(self.config, read_only=True)
+        warnings.warn(
+            "CombinedParentSelector is deprecated; use ProgramRepository + "
+            "shinka.core.search_policies.ParentSelector directly.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return ProgramRepository(self.db_path, num_islands=self.num_islands, read_only=True)
 
     def has_correct_programs(self, island_idx: Optional[int] = None) -> bool:
         repository = self._repository()

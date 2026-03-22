@@ -111,7 +111,6 @@ def test_shinka_run_happy_path_with_authoritative_overrides(tmp_path, monkeypatc
     assert _DummyRunner.last_kwargs is not None
 
     evo_config = _DummyRunner.last_kwargs["evo_config"]
-    db_config = _DummyRunner.last_kwargs["db_config"]
     job_config = _DummyRunner.last_kwargs["job_config"]
     init_program_str = _DummyRunner.last_kwargs["init_program_str"]
     evaluate_str = _DummyRunner.last_kwargs["evaluate_str"]
@@ -139,12 +138,12 @@ def test_shinka_run_happy_path_with_authoritative_overrides(tmp_path, monkeypatc
     assert evo_config.meta_rec_interval == 10
     assert evo_config.embedding_model == "text-embedding-3-small"
     assert evo_config.code_embed_sim_threshold == pytest.approx(0.99)
-    assert db_config.num_islands == 2
-    assert db_config.archive_size == 40
-    assert db_config.num_archive_inspirations == 1
-    assert db_config.num_top_k_inspirations == 1
-    assert db_config.migration_rate == pytest.approx(0.0)
-    assert db_config.parent_selection_strategy == "weighted"
+    assert _DummyRunner.last_kwargs["num_islands"] == 2
+    assert _DummyRunner.last_kwargs["archive_size"] == 40
+    assert _DummyRunner.last_kwargs["num_archive_inspirations"] == 1
+    assert _DummyRunner.last_kwargs["num_top_k_inspirations"] == 1
+    assert _DummyRunner.last_kwargs["migration_rate"] == pytest.approx(0.0)
+    assert _DummyRunner.last_kwargs["parent_selection_strategy"] == "weighted"
     assert job_config.time == "00:03:00"
     assert "def run" in init_program_str
     assert "def main" in evaluate_str
@@ -275,13 +274,12 @@ def test_shinka_run_loads_optional_config_yaml_with_precedence(tmp_path, monkeyp
 
     assert _DummyRunner.last_kwargs is not None
     evo_config = _DummyRunner.last_kwargs["evo_config"]
-    db_config = _DummyRunner.last_kwargs["db_config"]
     job_config = _DummyRunner.last_kwargs["job_config"]
 
     assert evo_config.results_dir == str(results_dir.resolve())
     assert evo_config.num_generations == 3
     assert evo_config.llm_models == ["gpt-5-mini"]
-    assert db_config.num_islands == 2
+    assert _DummyRunner.last_kwargs["num_islands"] == 2
     assert job_config.time == "00:04:00"
     assert _DummyRunner.last_kwargs["max_evaluation_jobs"] == 8
     assert _DummyRunner.last_kwargs["max_proposal_jobs"] == 7

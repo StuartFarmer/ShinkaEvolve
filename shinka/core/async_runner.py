@@ -21,7 +21,7 @@ from rich.console import Console
 from rich.table import Table
 import rich.box
 
-from shinka.database import ProgramDatabase, DatabaseConfig, Program, ProgramRepository
+from shinka.database import ProgramDatabase, Program, ProgramRepository
 from shinka.database.async_dbase import AsyncProgramDatabase
 from shinka.database.prompt_dbase import (
     SystemPromptDatabase,
@@ -148,7 +148,29 @@ class ShinkaEvolveRunner:
         self,
         evo_config: EvolutionConfig,
         job_config: JobConfig,
-        db_config: DatabaseConfig,
+        *,
+        db_path: Optional[str] = None,
+        num_islands: int = 2,
+        archive_size: int = 40,
+        elite_selection_ratio: float = 0.3,
+        num_archive_inspirations: int = 1,
+        num_top_k_inspirations: int = 1,
+        migration_interval: int = 10,
+        migration_rate: float = 0.0,
+        island_elitism: bool = True,
+        enforce_island_separation: bool = True,
+        island_selection_strategy: str = "uniform",
+        enable_dynamic_islands: bool = False,
+        stagnation_threshold: int = 100,
+        island_spawn_strategy: str = "initial",
+        island_spawn_subtree_size: int = 1,
+        parent_selection_strategy: str = "weighted",
+        exploitation_alpha: float = 1.0,
+        exploitation_ratio: float = 0.2,
+        parent_selection_lambda: float = 10.0,
+        num_beams: int = 5,
+        archive_selection_strategy: str = "fitness",
+        archive_criteria: Optional[Dict[str, float]] = None,
         verbose: bool = True,
         max_evaluation_jobs: int = 2,
         max_proposal_jobs: Optional[int] = None,
@@ -163,7 +185,6 @@ class ShinkaEvolveRunner:
         Args:
             evo_config: Evolution configuration
             job_config: Job configuration
-            db_config: Database configuration
             verbose: Enable verbose logging
             max_evaluation_jobs: Maximum concurrent evaluation jobs
                 (defaults to 2)
@@ -188,7 +209,28 @@ class ShinkaEvolveRunner:
 
         self.evo_config = evo_config
         self.job_config = job_config
-        self.db_config = db_config
+        self.db_path = db_path
+        self.num_islands = num_islands
+        self.archive_size = archive_size
+        self.migration_interval = migration_interval
+        self.migration_rate = migration_rate
+        self.island_elitism = island_elitism
+        self.enforce_island_separation = enforce_island_separation
+        self.island_selection_strategy = island_selection_strategy
+        self.enable_dynamic_islands = enable_dynamic_islands
+        self.stagnation_threshold = stagnation_threshold
+        self.island_spawn_strategy = island_spawn_strategy
+        self.island_spawn_subtree_size = island_spawn_subtree_size
+        self.parent_selection_strategy = parent_selection_strategy
+        self.exploitation_alpha = exploitation_alpha
+        self.exploitation_ratio = exploitation_ratio
+        self.parent_selection_lambda = parent_selection_lambda
+        self.num_beams = num_beams
+        self.archive_selection_strategy = archive_selection_strategy
+        self.archive_criteria = archive_criteria or {"combined_score": 1.0}
+        self.elite_selection_ratio = elite_selection_ratio
+        self.num_archive_inspirations = num_archive_inspirations
+        self.num_top_k_inspirations = num_top_k_inspirations
         self.enable_deadlock_debugging = debug
         log_filename = f"{self.results_dir}/evolution_run.log"
 
@@ -317,8 +359,8 @@ class ShinkaEvolveRunner:
         else:
             raise ValueError("Invalid llm_dynamic_selection")
 
-        # Store db_config for later initialization (after results_dir is set)
-        # Database will be initialized in _setup_async()
+        # Database-backed services are initialized in _setup_async() once the
+        # results directory is finalized.
         self.db = None
         self.async_db = None
         self.context_sampler = None
@@ -397,7 +439,8 @@ class ShinkaEvolveRunner:
             self.novelty_judge = AsyncNoveltyJudge(
                 sync_novelty_judge,
                 novelty_llm,
-                db_config=db_config,
+                db_path=self.db_path,
+                num_islands=self.num_islands,
             )
         else:
             self.novelty_judge = None
@@ -503,6 +546,13 @@ class ShinkaEvolveRunner:
                 copied_entries,
                 results_dir,
             )
+
+    def _open_repository(self, *, read_only: bool) -> ProgramRepository:
+        return ProgramRepository(
+            self.db_path,
+            num_islands=self.num_islands,
+            read_only=read_only,
+        )
 
     def _save_bandit_state(self) -> None:
         """Save the LLM selection bandit state to disk."""
@@ -613,10 +663,7 @@ class ShinkaEvolveRunner:
             """Thread-safe computation of total costs from persisted programs."""
             repo = None
             try:
-                repo = ProgramRepository.from_config(
-                    self.db_config,
-                    read_only=True,
-                )
+                repo = self._open_repository(read_only=True)
                 total_costs = 0.0
                 for program in repo.list_all():
                     metadata = program.metadata or {}
@@ -787,7 +834,8 @@ class ShinkaEvolveRunner:
                                 self.meta_summarizer.perform_final_summary_async(
                                     str(self.results_dir),
                                     best_program,
-                                    self.db_config,
+                                    db_path=self.db_path,
+                                    num_islands=self.num_islands,
                                 ),
                                 timeout=600.0,  # 10 minute timeout for final meta summary
                             )
@@ -843,12 +891,34 @@ class ShinkaEvolveRunner:
         # Update database path to be in results directory
         db_path = Path(f"{self.results_dir}/programs.sqlite")
 
-        # Update database config with results directory path
-        self.db_config.db_path = str(db_path)
+        # Persist the run database inside the results directory.
+        self.db_path = str(db_path)
 
         # Reinitialize database with updated path
         self.db = ProgramDatabase(
-            self.db_config, embedding_model=self.evo_config.embedding_model
+            db_path=self.db_path,
+            num_islands=self.num_islands,
+            archive_size=self.archive_size,
+            migration_interval=self.migration_interval,
+            migration_rate=self.migration_rate,
+            island_elitism=self.island_elitism,
+            island_selection_strategy=self.island_selection_strategy,
+            enable_dynamic_islands=self.enable_dynamic_islands,
+            stagnation_threshold=self.stagnation_threshold,
+            island_spawn_strategy=self.island_spawn_strategy,
+            island_spawn_subtree_size=self.island_spawn_subtree_size,
+            parent_selection_strategy=self.parent_selection_strategy,
+            exploitation_alpha=self.exploitation_alpha,
+            exploitation_ratio=self.exploitation_ratio,
+            parent_selection_lambda=self.parent_selection_lambda,
+            num_beams=self.num_beams,
+            archive_selection_strategy=self.archive_selection_strategy,
+            archive_criteria=self.archive_criteria,
+            elite_selection_ratio=self.elite_selection_ratio,
+            num_archive_inspirations=self.num_archive_inspirations,
+            num_top_k_inspirations=self.num_top_k_inspirations,
+            enforce_island_separation=self.enforce_island_separation,
+            embedding_model=self.evo_config.embedding_model,
         )
         if hasattr(self.db, "set_display_console"):
             self.db.set_display_console(self.console)
@@ -860,7 +930,22 @@ class ShinkaEvolveRunner:
             max_workers=self.max_db_workers,
             enable_deadlock_debugging=self.enable_deadlock_debugging,
         )
-        self.context_sampler = AsyncContextSampler(self.db_config)
+        self.context_sampler = AsyncContextSampler(
+            db_path=self.db_path,
+            num_islands=self.num_islands,
+            island_selection_strategy=self.island_selection_strategy,
+            num_archive_inspirations=self.num_archive_inspirations,
+            num_top_k_inspirations=self.num_top_k_inspirations,
+            parent_selection_strategy=self.parent_selection_strategy,
+            exploitation_alpha=self.exploitation_alpha,
+            parent_selection_lambda=self.parent_selection_lambda,
+            num_beams=self.num_beams,
+            enforce_island_separation=self.enforce_island_separation,
+            elite_selection_ratio=self.elite_selection_ratio,
+        )
+        if self.novelty_judge is not None:
+            self.novelty_judge.db_path = self.db_path
+            self.novelty_judge.num_islands = self.num_islands
 
         # Initialize prompt evolution database if enabled
         if self.evo_config.evolve_prompts:
@@ -921,7 +1006,7 @@ class ShinkaEvolveRunner:
                 await self._generate_initial_program()
 
     def _list_all_programs_via_repository(self) -> list[Program]:
-        repository = ProgramRepository.from_config(self.db_config, read_only=True)
+        repository = self._open_repository(read_only=True)
         try:
             return repository.list_all()
         finally:
@@ -1229,7 +1314,7 @@ class ShinkaEvolveRunner:
         """Persist metadata updates for a stored initial program."""
 
         def update_metadata():
-            repo = ProgramRepository.from_config(self.db_config, read_only=False)
+            repo = self._open_repository(read_only=False)
             try:
                 repo.update_program_metadata(
                     initial_program.id,
@@ -1319,7 +1404,7 @@ class ShinkaEvolveRunner:
         if not island_seeds:
             raise ValueError("evo.island_seeds was provided but no seeds were defined")
 
-        num_islands = getattr(self.db_config, "num_islands", 0)
+        num_islands = self.num_islands
         if num_islands <= 0:
             raise ValueError(
                 "Explicit island seeds require db.num_islands to be greater than 0"
@@ -2386,8 +2471,7 @@ class ShinkaEvolveRunner:
                     # Sync beam_search parent to main database if using beam_search strategy
                     # (async sampling uses read-only thread-local DBs that can't persist state)
                     if (
-                        getattr(self.db_config, "parent_selection_strategy", "")
-                        == "beam_search"
+                        self.parent_selection_strategy == "beam_search"
                         and parent_program
                     ):
                         await self.async_db.update_beam_search_parent_async(
@@ -3435,10 +3519,7 @@ class ShinkaEvolveRunner:
 
                                 # Update the program in the database
                                 def update_metadata():
-                                    repo = ProgramRepository.from_config(
-                                        self.db_config,
-                                        read_only=False,
-                                    )
+                                    repo = self._open_repository(read_only=False)
                                     try:
                                         repo.update_program_metadata(
                                             program.id,

@@ -2,7 +2,6 @@ import tempfile
 from pathlib import Path
 
 from shinka.database import (
-    DatabaseConfig,
     IslandRepository,
     MetadataRepository,
     Program,
@@ -25,7 +24,8 @@ def test_metadata_repository_loads_and_persists_run_state():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "metadata_repo.db"
         db = ProgramDatabase(
-            config=DatabaseConfig(db_path=str(db_path), num_islands=2),
+            db_path=str(db_path),
+            num_islands=2,
             embedding_model="",
             read_only=False,
         )
@@ -49,7 +49,8 @@ def test_island_repository_reports_island_state():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "island_repo.db"
         db = ProgramDatabase(
-            config=DatabaseConfig(db_path=str(db_path), num_islands=3),
+            db_path=str(db_path),
+            num_islands=3,
             embedding_model="",
             read_only=False,
         )
@@ -60,7 +61,7 @@ def test_island_repository_reports_island_state():
             repo = IslandRepository(
                 conn=db.conn,
                 cursor=db.cursor,
-                num_islands=db.config.num_islands,
+                num_islands=db.num_islands,
             )
 
             assert repo.get_program_island("p1") == 2

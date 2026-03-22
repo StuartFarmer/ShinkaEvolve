@@ -419,7 +419,7 @@ def _build_runner(
     args: argparse.Namespace,
     task_dir: Path,
     evo_config: EvolutionConfig,
-    db_config: DatabaseConfig,
+    db_values: Dict[str, Any],
     job_config: LocalJobConfig,
     init_program_str: Optional[str],
     evaluate_str: str,
@@ -427,13 +427,13 @@ def _build_runner(
     runner_kwargs: Dict[str, Any] = {
         "evo_config": evo_config,
         "job_config": job_config,
-        "db_config": db_config,
         "verbose": args.verbose,
         "debug": args.debug,
         "task_dir": str(task_dir),
         "init_program_str": init_program_str,
         "evaluate_str": evaluate_str,
     }
+    runner_kwargs.update(db_values)
     if args.max_evaluation_jobs is not None:
         runner_kwargs["max_evaluation_jobs"] = args.max_evaluation_jobs
     if args.max_proposal_jobs is not None:
@@ -544,7 +544,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         args.debug = args.debug or bool(runner_config.get("debug", False))
 
         evo_config = EvolutionConfig(**evo_values)
-        db_config = DatabaseConfig(**db_values)
         job_config = LocalJobConfig(**job_values)
 
         init_program_str = (
@@ -558,7 +557,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             args=args,
             task_dir=task_dir,
             evo_config=evo_config,
-            db_config=db_config,
+            db_values=db_values,
             job_config=job_config,
             init_program_str=init_program_str,
             evaluate_str=evaluate_str,

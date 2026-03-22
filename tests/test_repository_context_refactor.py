@@ -4,7 +4,7 @@ import time
 import uuid
 
 from shinka.core.context_sampler import ContextSampler, SampledContext
-from shinka.database import DatabaseConfig, Program, ProgramRepository
+from shinka.database import Program, ProgramRepository
 from shinka.database.archive_policy import FitnessArchivePolicy
 
 
@@ -34,7 +34,7 @@ def make_program(
 
 def test_program_repository_roundtrip_and_queries(tmp_path):
     db_path = tmp_path / "programs.sqlite"
-    repo = ProgramRepository(DatabaseConfig(db_path=str(db_path), num_islands=2))
+    repo = ProgramRepository(str(db_path), num_islands=2)
 
     root = make_program(generation=0, score=1.0, correct=True, island_idx=0, timestamp=1.0)
     child = make_program(
@@ -80,13 +80,7 @@ def test_program_repository_roundtrip_and_queries(tmp_path):
 
 def test_fitness_archive_policy_recomputes_from_programs(tmp_path):
     db_path = tmp_path / "programs.sqlite"
-    config = DatabaseConfig(
-        db_path=str(db_path),
-        num_islands=1,
-        archive_size=2,
-        archive_selection_strategy="fitness",
-    )
-    repo = ProgramRepository(config)
+    repo = ProgramRepository(str(db_path), num_islands=1)
 
     p1 = make_program(generation=0, score=1.0, correct=True, island_idx=0, timestamp=1.0)
     p2 = make_program(generation=1, score=4.0, correct=True, island_idx=0, timestamp=2.0)
@@ -96,7 +90,7 @@ def test_fitness_archive_policy_recomputes_from_programs(tmp_path):
     for program in [p1, p2, p3, p4]:
         repo.add(program)
 
-    archive = FitnessArchivePolicy(config).compute(repo.list_all())
+    archive = FitnessArchivePolicy(archive_size=2).compute(repo.list_all())
     assert [program.id for program in archive] == [p2.id, p3.id]
 
     repo.close()
@@ -104,16 +98,7 @@ def test_fitness_archive_policy_recomputes_from_programs(tmp_path):
 
 def test_context_sampler_uses_repository_backed_archive_and_parent_selection(tmp_path):
     db_path = tmp_path / "programs.sqlite"
-    config = DatabaseConfig(
-        db_path=str(db_path),
-        num_islands=1,
-        archive_size=3,
-        parent_selection_strategy="winner_take_all",
-        num_archive_inspirations=2,
-        num_top_k_inspirations=1,
-        enforce_island_separation=True,
-    )
-    repo = ProgramRepository(config)
+    repo = ProgramRepository(str(db_path), num_islands=1)
 
     p0 = make_program(generation=0, score=1.0, correct=True, island_idx=0, timestamp=1.0)
     p1 = make_program(generation=1, score=2.0, correct=True, island_idx=0, timestamp=2.0)
@@ -123,7 +108,14 @@ def test_context_sampler_uses_repository_backed_archive_and_parent_selection(tmp
     for program in [p0, p1, p2, p3]:
         repo.add(program)
 
-    sampled = ContextSampler(repo).sample(target_generation=4)
+    sampled = ContextSampler(
+        repo,
+        archive_policy=FitnessArchivePolicy(archive_size=3),
+        parent_selection_strategy="winner_take_all",
+        num_archive_inspirations=2,
+        num_top_k_inspirations=1,
+        enforce_island_separation=True,
+    ).sample(target_generation=4)
 
     assert isinstance(sampled, SampledContext)
     assert sampled.parent.id == p2.id
@@ -139,14 +131,7 @@ def test_context_sampler_uses_repository_backed_archive_and_parent_selection(tmp
 
 def test_context_sampler_fix_mode_returns_incorrect_parent_with_ancestry(tmp_path):
     db_path = tmp_path / "programs.sqlite"
-    config = DatabaseConfig(
-        db_path=str(db_path),
-        num_islands=1,
-        archive_size=3,
-        num_archive_inspirations=2,
-        num_top_k_inspirations=1,
-    )
-    repo = ProgramRepository(config)
+    repo = ProgramRepository(str(db_path), num_islands=1)
 
     root = make_program(generation=0, score=0.0, correct=False, island_idx=0, timestamp=1.0)
     child = make_program(
@@ -160,7 +145,12 @@ def test_context_sampler_fix_mode_returns_incorrect_parent_with_ancestry(tmp_pat
     repo.add(root)
     repo.add(child)
 
-    sampled = ContextSampler(repo).sample(target_generation=2, with_fix_mode=True)
+    sampled = ContextSampler(
+        repo,
+        archive_policy=FitnessArchivePolicy(archive_size=3),
+        num_archive_inspirations=2,
+        num_top_k_inspirations=1,
+    ).sample(target_generation=2, with_fix_mode=True)
 
     assert sampled.needs_fix is True
     assert sampled.parent.id in {root.id, child.id}

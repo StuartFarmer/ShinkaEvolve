@@ -61,7 +61,18 @@ async def _run_single_additions_with_complexity() -> float:
             embedding_model="",
         )
         async_db = AsyncProgramDatabase(
-            sync_db=sync_db,
+            db_path=str(db_path),
+            num_islands=1,
+            embedding_model="",
+            ensure_embedding_client=sync_db._ensure_embedding_client,
+            update_last_iteration=lambda value: setattr(
+                sync_db,
+                "last_iteration",
+                max(getattr(sync_db, "last_iteration", 0), value),
+            ),
+            update_beam_search_parent=lambda parent_id: setattr(
+                sync_db, "beam_search_parent_id", parent_id
+            ),
             embedding_recompute_interval=EMBEDDING_RECOMPUTE_INTERVAL,
         )
 
@@ -99,7 +110,18 @@ async def _run_concurrent_additions_with_complexity() -> float:
             embedding_model="",
         )
         async_db = AsyncProgramDatabase(
-            sync_db=sync_db,
+            db_path=str(db_path),
+            num_islands=1,
+            embedding_model="",
+            ensure_embedding_client=sync_db._ensure_embedding_client,
+            update_last_iteration=lambda value: setattr(
+                sync_db,
+                "last_iteration",
+                max(getattr(sync_db, "last_iteration", 0), value),
+            ),
+            update_beam_search_parent=lambda parent_id: setattr(
+                sync_db, "beam_search_parent_id", parent_id
+            ),
             embedding_recompute_interval=EMBEDDING_RECOMPUTE_INTERVAL,
         )
 

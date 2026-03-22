@@ -45,7 +45,20 @@ def test_async_db_add_without_openai_key_when_embeddings_disabled(monkeypatch):
                 num_islands=1,
                 embedding_model="",
             )
-            async_db = AsyncProgramDatabase(sync_db=sync_db)
+            async_db = AsyncProgramDatabase(
+                db_path=str(db_path),
+                num_islands=1,
+                embedding_model="",
+                ensure_embedding_client=sync_db._ensure_embedding_client,
+                update_last_iteration=lambda value: setattr(
+                    sync_db,
+                    "last_iteration",
+                    max(getattr(sync_db, "last_iteration", 0), value),
+                ),
+                update_beam_search_parent=lambda parent_id: setattr(
+                    sync_db, "beam_search_parent_id", parent_id
+                ),
+            )
             try:
                 await async_db.add_program_async(_program("async-p0"))
                 repo = ProgramRepository(str(db_path), num_islands=1, read_only=True)

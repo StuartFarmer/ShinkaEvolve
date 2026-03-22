@@ -8,7 +8,7 @@ import logging
 import time
 import threading
 import traceback
-from typing import TYPE_CHECKING, List, Optional, Tuple, Dict, Any
+from typing import Callable, List, Optional, Tuple, Dict, Any
 from concurrent.futures import ThreadPoolExecutor
 
 from .complexity import analyze_code_metrics
@@ -19,9 +19,6 @@ from .islands import CombinedIslandManager
 from .program_write_service import ProgramWriteService
 from .repository import ProgramRepository
 from .repository_bundle import RepositoryBundle
-
-if TYPE_CHECKING:
-    from .dbase import ProgramDatabase
 
 logger = logging.getLogger(__name__)
 
@@ -83,55 +80,74 @@ db_debugger = AsyncDBDebugger()
 
 
 class AsyncProgramDatabase:
-    """Async wrapper around ProgramDatabase for concurrent operations."""
+    """Async wrapper around repository-backed runtime services."""
 
     def __init__(
         self,
-        sync_db: "ProgramDatabase",
+        *,
+        db_path: str,
+        num_islands: int = 2,
+        migration_interval: int = 10,
+        migration_rate: float = 0.0,
+        island_elitism: bool = True,
+        enable_dynamic_islands: bool = False,
+        stagnation_threshold: int = 100,
+        island_spawn_strategy: str = "initial",
+        island_spawn_subtree_size: int = 1,
+        archive_selection_strategy: str = "fitness",
+        archive_size: int = 40,
+        archive_criteria: Optional[Dict[str, float]] = None,
+        island_selection_strategy: str = "uniform",
+        num_archive_inspirations: int = 1,
+        num_top_k_inspirations: int = 1,
+        parent_selection_strategy: str = "weighted",
+        exploitation_alpha: float = 1.0,
+        parent_selection_lambda: float = 10.0,
+        num_beams: int = 5,
+        enforce_island_separation: bool = True,
+        elite_selection_ratio: float = 0.3,
+        embedding_model: str = "",
+        ensure_embedding_client: Optional[Callable[[], Any]] = None,
+        update_last_iteration: Optional[Callable[[int], None]] = None,
+        update_beam_search_parent: Optional[Callable[[str], None]] = None,
         max_workers: int = 1,
         embedding_recompute_interval: int = 10,
         enable_deadlock_debugging: bool = False,
     ):
-        """Initialize with existing sync database and thread pool.
+        """Initialize async DB services from explicit runtime arguments.
 
         Args:
-            sync_db: The synchronous ProgramDatabase instance
+            db_path: SQLite database path
             max_workers: Maximum number of threads for database operations
             embedding_recompute_interval: Programs to add before recomputing
             enable_deadlock_debugging: Enable detailed deadlock monitoring and logging
         """
-        self.db_path = sync_db.db_path
-        self.num_islands = sync_db.num_islands
-        self.migration_interval = sync_db.migration_interval
-        self.migration_rate = sync_db.migration_rate
-        self.island_elitism = sync_db.island_elitism
-        self.enable_dynamic_islands = sync_db.enable_dynamic_islands
-        self.stagnation_threshold = sync_db.stagnation_threshold
-        self.island_spawn_strategy = sync_db.island_spawn_strategy
-        self.island_spawn_subtree_size = sync_db.island_spawn_subtree_size
-        self.archive_selection_strategy = sync_db.archive_selection_strategy
-        self.archive_size = sync_db.archive_size
-        self.archive_criteria = sync_db.archive_criteria
-        self.island_selection_strategy = sync_db.island_selection_strategy
-        self.num_archive_inspirations = sync_db.num_archive_inspirations
-        self.num_top_k_inspirations = sync_db.num_top_k_inspirations
-        self.parent_selection_strategy = sync_db.parent_selection_strategy
-        self.exploitation_alpha = sync_db.exploitation_alpha
-        self.parent_selection_lambda = sync_db.parent_selection_lambda
-        self.num_beams = sync_db.num_beams
-        self.enforce_island_separation = sync_db.enforce_island_separation
-        self.elite_selection_ratio = sync_db.elite_selection_ratio
-        self.embedding_model = sync_db.embedding_model
-        self.ensure_embedding_client = sync_db._ensure_embedding_client
-        self.update_last_iteration = lambda value: setattr(
-            sync_db,
-            "last_iteration",
-            max(getattr(sync_db, "last_iteration", 0), value),
-        )
-        self.update_beam_search_parent = lambda parent_id: setattr(
-            sync_db,
-            "beam_search_parent_id",
-            parent_id,
+        self.db_path = db_path
+        self.num_islands = num_islands
+        self.migration_interval = migration_interval
+        self.migration_rate = migration_rate
+        self.island_elitism = island_elitism
+        self.enable_dynamic_islands = enable_dynamic_islands
+        self.stagnation_threshold = stagnation_threshold
+        self.island_spawn_strategy = island_spawn_strategy
+        self.island_spawn_subtree_size = island_spawn_subtree_size
+        self.archive_selection_strategy = archive_selection_strategy
+        self.archive_size = archive_size
+        self.archive_criteria = archive_criteria or {"combined_score": 1.0}
+        self.island_selection_strategy = island_selection_strategy
+        self.num_archive_inspirations = num_archive_inspirations
+        self.num_top_k_inspirations = num_top_k_inspirations
+        self.parent_selection_strategy = parent_selection_strategy
+        self.exploitation_alpha = exploitation_alpha
+        self.parent_selection_lambda = parent_selection_lambda
+        self.num_beams = num_beams
+        self.enforce_island_separation = enforce_island_separation
+        self.elite_selection_ratio = elite_selection_ratio
+        self.embedding_model = embedding_model
+        self.ensure_embedding_client = ensure_embedding_client or (lambda: None)
+        self.update_last_iteration = update_last_iteration or (lambda value: None)
+        self.update_beam_search_parent = (
+            update_beam_search_parent or (lambda parent_id: None)
         )
         # Use multiple workers for better concurrency with proper coordination
         if max_workers < 1:

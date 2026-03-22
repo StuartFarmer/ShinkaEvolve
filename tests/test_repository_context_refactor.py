@@ -4,7 +4,7 @@ import time
 import uuid
 
 from shinka.core.context_sampler import ContextSampler, SampledContext
-from shinka.database import Program, ProgramRepository
+from shinka.database import InspirationUse, Program, ProgramRepository
 from shinka.database.archive_policy import FitnessArchivePolicy
 
 
@@ -92,6 +92,59 @@ def test_fitness_archive_policy_recomputes_from_programs(tmp_path):
 
     archive = FitnessArchivePolicy(archive_size=2).compute(repo.list_all())
     assert [program.id for program in archive] == [p2.id, p3.id]
+
+    repo.close()
+
+
+def test_program_repository_persists_inspirations_in_join_table(tmp_path):
+    db_path = tmp_path / "programs.sqlite"
+    repo = ProgramRepository(str(db_path), num_islands=1)
+
+    source_a = make_program(generation=0, score=1.0, correct=True, island_idx=0, timestamp=1.0)
+    source_b = make_program(generation=1, score=2.0, correct=True, island_idx=0, timestamp=2.0)
+    child = make_program(
+        generation=2,
+        score=3.0,
+        correct=True,
+        island_idx=0,
+        parent_id=source_b.id,
+        timestamp=3.0,
+    )
+    child.archive_inspiration_ids = [source_a.id]
+    child.top_k_inspiration_ids = [source_b.id]
+
+    repo.add(source_a)
+    repo.add(source_b)
+    repo.add(child)
+
+    loaded = repo.get(child.id)
+    assert loaded is not None
+    assert loaded.archive_inspiration_ids == [source_a.id]
+    assert loaded.top_k_inspiration_ids == [source_b.id]
+
+    uses = repo.inspiration_repo.list_for_child(child.id)
+    assert uses == [
+        InspirationUse(
+            child_program_id=child.id,
+            source_program_id=source_a.id,
+            role="archive",
+            order_index=0,
+            weight=None,
+            metadata={},
+        ),
+        InspirationUse(
+            child_program_id=child.id,
+            source_program_id=source_b.id,
+            role="top_k",
+            order_index=0,
+            weight=None,
+            metadata={},
+        ),
+    ]
+
+    summary = next(item for item in repo.get_summaries() if item["id"] == child.id)
+    assert summary["archive_inspiration_ids"] == [source_a.id]
+    assert summary["top_k_inspiration_ids"] == [source_b.id]
 
     repo.close()
 

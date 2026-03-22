@@ -4,6 +4,8 @@ import sqlite3
 from pathlib import Path
 from typing import Optional, Tuple, Union
 
+from shinka.database import ProgramRepository
+
 
 def load_programs_to_df(
     db_path_str: str,
@@ -43,61 +45,24 @@ def load_programs_to_df(
         return None
 
     conn = None
+    repo = None
     try:
-        conn = sqlite3.connect(str(db_file))
-        cursor = conn.cursor()
+        repo = ProgramRepository(str(db_file), read_only=True)
+        programs = repo.list_all()
 
-        cursor.execute("SELECT * FROM programs")  # Fetch all columns
-        all_program_rows = cursor.fetchall()
-
-        if not all_program_rows:
+        if not programs:
             print(f"No programs found in the database: {db_path_str}")
             return pd.DataFrame()  # Return empty DataFrame if no programs
-
-        # Get column names from cursor.description
-        column_names = [description[0] for description in cursor.description]
-        # print(column_names)
         programs_data = []
-        for row_tuple in all_program_rows:
-            # Convert row tuple to dict
-            p_dict = dict(zip(column_names, row_tuple))
-
-            # Metrics and metadata are stored as JSON strings
-            metrics_json = p_dict.get("metrics", "{}")
-            metrics_dict = json.loads(metrics_json) if metrics_json else {}
-
-            # Parse inspiration_ids JSON
-            archive_insp_ids_json = p_dict.get("archive_inspiration_ids", "[]")
-            archive_insp_ids = (
-                json.loads(archive_insp_ids_json) if archive_insp_ids_json else []
-            )
-            top_k_insp_ids_json = p_dict.get("top_k_inspiration_ids", "[]")
-            top_k_insp_ids = (
-                json.loads(top_k_insp_ids_json) if top_k_insp_ids_json else []
-            )
-            metadata_json = p_dict.get("metadata", "{}")
-            metadata_dict = json.loads(metadata_json) if metadata_json else {}
-
-            # Parse public_metrics and private_metrics
-            public_metrics_raw = p_dict.get("public_metrics", "{}")
-            if isinstance(public_metrics_raw, str):
-                public_metrics_dict = (
-                    json.loads(public_metrics_raw) if public_metrics_raw else {}
-                )
-            else:
-                public_metrics_dict = public_metrics_raw or {}
-
-            private_metrics_raw = p_dict.get("private_metrics", "{}")
-            if isinstance(private_metrics_raw, str):
-                private_metrics_dict = (
-                    json.loads(private_metrics_raw) if private_metrics_raw else {}
-                )
-            else:
-                private_metrics_dict = private_metrics_raw or {}
-
-            embedding = p_dict.get("embedding", [])
-            if isinstance(embedding, str):
-                embedding = json.loads(embedding)
+        for program in programs:
+            p_dict = program.to_dict()
+            metrics_dict = {}
+            metadata_dict = p_dict.get("metadata", {}) or {}
+            public_metrics_dict = p_dict.get("public_metrics", {}) or {}
+            private_metrics_dict = p_dict.get("private_metrics", {}) or {}
+            archive_insp_ids = p_dict.get("archive_inspiration_ids", []) or []
+            top_k_insp_ids = p_dict.get("top_k_inspiration_ids", []) or []
+            embedding = p_dict.get("embedding", []) or []
             # Create a flat dictionary for the DataFrame
             try:
                 timestamp = pd.to_datetime(p_dict.get("timestamp"), unit="s")
@@ -160,6 +125,8 @@ def load_programs_to_df(
         print(f"JSON decoding error for metrics/metadata in {db_path}: {e}")
         return (None, None) if include_prompts else None
     finally:
+        if repo:
+            repo.close()
         if conn:
             conn.close()
 

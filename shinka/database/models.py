@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import Boolean, Float, Integer, String, Text
+from sqlalchemy import Boolean, Float, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import JSON
 
@@ -16,8 +16,6 @@ class ProgramRecord(Base):
     code: Mapped[str] = mapped_column(Text, nullable=False)
     language: Mapped[str] = mapped_column(String, nullable=False, default="python")
     parent_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    archive_inspiration_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
-    top_k_inspiration_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     timestamp: Mapped[float] = mapped_column(Float, nullable=False)
     code_diff: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -43,3 +41,24 @@ class MetadataRecord(Base):
 
     key: Mapped[str] = mapped_column(String, primary_key=True)
     value: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ProgramInspirationRecord(Base):
+    __tablename__ = "program_inspirations"
+    __table_args__ = (
+        UniqueConstraint(
+            "child_program_id",
+            "source_program_id",
+            "role",
+            "order_index",
+            name="uq_program_inspiration_edge",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    child_program_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    source_program_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    order_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    weight: Mapped[float | None] = mapped_column(Float, nullable=True)
+    edge_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)

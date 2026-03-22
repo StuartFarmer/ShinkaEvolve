@@ -29,6 +29,7 @@ from sqlalchemy.pool import StaticPool
 
 from .complexity import analyze_code_metrics
 from .dbase import Program
+from .inspiration_repository import InspirationRepository, InspirationUse
 from .island_repository import Island, IslandRepository
 from .metadata_repository import MetadataRepository
 from .models import Base, ProgramRecord
@@ -88,6 +89,7 @@ class ProgramRepository:
         self.best_program_id: str | None = None
         self.metadata_repo: MetadataRepository | None = None
         self.island_repo: IslandRepository | None = None
+        self.inspiration_repo: InspirationRepository | None = None
 
         self._connect()
         self._ensure_schema()
@@ -138,6 +140,10 @@ class ProgramRepository:
             cursor=cursor,
             read_only=read_only,
         )
+        repo.inspiration_repo = InspirationRepository(
+            session_factory=repo.SessionLocal,
+            read_only=read_only,
+        )
         repo.island_repo = IslandRepository(
             conn=conn,
             cursor=cursor,
@@ -186,6 +192,10 @@ class ProgramRepository:
         self.metadata_repo = MetadataRepository(
             conn=self.conn,
             cursor=self.cursor,
+            read_only=self.read_only,
+        )
+        self.inspiration_repo = InspirationRepository(
+            session_factory=self.SessionLocal,
             read_only=self.read_only,
         )
         self.island_repo = IslandRepository(
@@ -239,17 +249,71 @@ class ProgramRepository:
             raise ConnectionError("Repository not connected.")
         return self.SessionLocal()
 
-    def _record_to_program(self, record: ProgramRecord | None) -> Optional[Program]:
+    def _build_inspiration_index(
+        self,
+        child_program_ids: Sequence[str],
+    ) -> Dict[str, Dict[str, List[str]]]:
+        if self.inspiration_repo is None:
+            raise ConnectionError("Repository inspiration store not initialized.")
+        uses_by_child = self.inspiration_repo.list_for_children(child_program_ids)
+        index: Dict[str, Dict[str, List[str]]] = {
+            child_id: {"archive": [], "top_k": [], "ancestor": []}
+            for child_id in child_program_ids
+        }
+        for child_id, inspirations in uses_by_child.items():
+            for inspiration in inspirations:
+                role_bucket = index.setdefault(
+                    child_id,
+                    {"archive": [], "top_k": [], "ancestor": []},
+                )
+                role_bucket.setdefault(inspiration.role, []).append(
+                    inspiration.source_program_id
+                )
+        return index
+
+    def _program_inspiration_uses(self, program: Program) -> List[InspirationUse]:
+        inspirations: List[InspirationUse] = []
+        for idx, source_program_id in enumerate(program.archive_inspiration_ids or []):
+            inspirations.append(
+                InspirationUse(
+                    child_program_id=program.id,
+                    source_program_id=source_program_id,
+                    role="archive",
+                    order_index=idx,
+                )
+            )
+        for idx, source_program_id in enumerate(program.top_k_inspiration_ids or []):
+            inspirations.append(
+                InspirationUse(
+                    child_program_id=program.id,
+                    source_program_id=source_program_id,
+                    role="top_k",
+                    order_index=idx,
+                )
+            )
+        return inspirations
+
+    def _record_to_program(
+        self,
+        record: ProgramRecord | None,
+        *,
+        inspiration_index: Optional[Dict[str, Dict[str, List[str]]]] = None,
+    ) -> Optional[Program]:
         if record is None:
             return None
+        inspiration_lists = (
+            inspiration_index.get(record.id, {})
+            if inspiration_index is not None
+            else self._build_inspiration_index([record.id]).get(record.id, {})
+        )
         return Program.from_dict(
             {
                 "id": record.id,
                 "code": record.code,
                 "language": record.language,
                 "parent_id": record.parent_id,
-                "archive_inspiration_ids": record.archive_inspiration_ids or [],
-                "top_k_inspiration_ids": record.top_k_inspiration_ids or [],
+                "archive_inspiration_ids": inspiration_lists.get("archive", []),
+                "top_k_inspiration_ids": inspiration_lists.get("top_k", []),
                 "generation": record.generation,
                 "timestamp": record.timestamp,
                 "code_diff": record.code_diff,
@@ -271,7 +335,17 @@ class ProgramRepository:
             }
         )
 
-    def _record_to_summary(self, record: ProgramRecord) -> dict[str, Any]:
+    def _record_to_summary(
+        self,
+        record: ProgramRecord,
+        *,
+        inspiration_index: Optional[Dict[str, Dict[str, List[str]]]] = None,
+    ) -> dict[str, Any]:
+        inspiration_lists = (
+            inspiration_index.get(record.id, {})
+            if inspiration_index is not None
+            else self._build_inspiration_index([record.id]).get(record.id, {})
+        )
         return {
             "id": record.id,
             "parent_id": record.parent_id,
@@ -289,8 +363,8 @@ class ProgramRepository:
             "embedding_pca_3d": record.embedding_pca_3d or [],
             "embedding_cluster_id": record.embedding_cluster_id,
             "language": record.language,
-            "top_k_inspiration_ids": record.top_k_inspiration_ids or [],
-            "archive_inspiration_ids": record.archive_inspiration_ids or [],
+            "top_k_inspiration_ids": inspiration_lists.get("top_k", []),
+            "archive_inspiration_ids": inspiration_lists.get("archive", []),
             "migration_history": record.migration_history or [],
             "in_archive": False,
         }
@@ -319,7 +393,17 @@ class ProgramRepository:
     def _list_programs(self, query) -> List[Program]:
         with self._session() as session:
             records = session.execute(query).scalars().all()
-        return [p for p in (self._record_to_program(record) for record in records) if p is not None]
+        inspiration_index = self._build_inspiration_index(
+            [record.id for record in records]
+        )
+        return [
+            p
+            for p in (
+                self._record_to_program(record, inspiration_index=inspiration_index)
+                for record in records
+            )
+            if p is not None
+        ]
 
     def add(self, program: Program, *, verbose: bool = False) -> str:
         if self.read_only:
@@ -350,8 +434,6 @@ class ProgramRepository:
                     code=program.code,
                     language=program.language,
                     parent_id=program.parent_id,
-                    archive_inspiration_ids=_clean_nan_values(program.archive_inspiration_ids or []),
-                    top_k_inspiration_ids=_clean_nan_values(program.top_k_inspiration_ids or []),
                     generation=program.generation,
                     timestamp=program.timestamp,
                     code_diff=program.code_diff,
@@ -378,6 +460,13 @@ class ProgramRepository:
                     .where(ProgramRecord.id == program.parent_id)
                     .values(children_count=ProgramRecord.children_count + 1)
                 )
+            if self.inspiration_repo is None:
+                raise ConnectionError("Repository inspiration store not initialized.")
+            self.inspiration_repo.replace_for_child(
+                program.id,
+                self._program_inspiration_uses(program),
+                session=session,
+            )
             session.commit()
 
         if program.generation > self.last_iteration:
@@ -399,7 +488,8 @@ class ProgramRepository:
 
     def get(self, program_id: str) -> Optional[Program]:
         with self._session() as session:
-            return self._record_to_program(session.get(ProgramRecord, program_id))
+            record = session.get(ProgramRecord, program_id)
+        return self._record_to_program(record)
 
     def get_children_count(self, program_id: str) -> int:
         with self._session() as session:
@@ -410,10 +500,19 @@ class ProgramRepository:
         if not program_ids:
             return []
         with self._session() as session:
-            records = session.execute(
+            records = list(
+                session.execute(
                 select(ProgramRecord).where(ProgramRecord.id.in_(program_ids))
             ).scalars()
-            by_id = {record.id: self._record_to_program(record) for record in records}
+            )
+        inspiration_index = self._build_inspiration_index([record.id for record in records])
+        by_id = {
+            record.id: self._record_to_program(
+                record,
+                inspiration_index=inspiration_index,
+            )
+            for record in records
+        }
         return [by_id[program_id] for program_id in program_ids if by_id.get(program_id) is not None]
 
     def get_program_count(self) -> int:
@@ -558,8 +657,6 @@ class ProgramRepository:
                     code=program.code,
                     language=program.language,
                     parent_id=program.parent_id,
-                    archive_inspiration_ids=_clean_nan_values(program.archive_inspiration_ids or []),
-                    top_k_inspiration_ids=_clean_nan_values(program.top_k_inspiration_ids or []),
                     generation=program.generation,
                     timestamp=program.timestamp,
                     code_diff=program.code_diff,
@@ -579,6 +676,23 @@ class ProgramRepository:
                     migration_history=_clean_nan_values(program.migration_history or []),
                     system_prompt_id=program.system_prompt_id,
                 )
+            )
+            if self.inspiration_repo is None:
+                raise ConnectionError("Repository inspiration store not initialized.")
+            self.inspiration_repo.replace_for_child(
+                new_id,
+                [
+                    InspirationUse(
+                        child_program_id=new_id,
+                        source_program_id=inspiration.source_program_id,
+                        role=inspiration.role,
+                        order_index=inspiration.order_index,
+                        weight=inspiration.weight,
+                        metadata=dict(inspiration.metadata or {}),
+                    )
+                    for inspiration in self._program_inspiration_uses(program)
+                ],
+                session=session,
             )
             session.commit()
         return new_id
@@ -610,8 +724,6 @@ class ProgramRepository:
                     code=source_program["code"],
                     language=source_program["language"],
                     parent_id=new_parent_id,
-                    archive_inspiration_ids=_clean_nan_values(source_program.get("archive_inspiration_ids") or []),
-                    top_k_inspiration_ids=_clean_nan_values(source_program.get("top_k_inspiration_ids") or []),
                     generation=source_program.get("generation", 0),
                     timestamp=time.time(),
                     code_diff=None,
@@ -638,6 +750,34 @@ class ProgramRepository:
                     .where(ProgramRecord.id == new_parent_id)
                     .values(children_count=ProgramRecord.children_count + 1)
                 )
+            if self.inspiration_repo is None:
+                raise ConnectionError("Repository inspiration store not initialized.")
+            source_archive_ids = list(
+                source_program.get("archive_inspiration_ids") or []
+            )
+            source_top_k_ids = list(source_program.get("top_k_inspiration_ids") or [])
+            self.inspiration_repo.replace_for_child(
+                new_id,
+                [
+                    InspirationUse(
+                        child_program_id=new_id,
+                        source_program_id=source_program_id,
+                        role="archive",
+                        order_index=idx,
+                    )
+                    for idx, source_program_id in enumerate(source_archive_ids)
+                ]
+                + [
+                    InspirationUse(
+                        child_program_id=new_id,
+                        source_program_id=source_program_id,
+                        role="top_k",
+                        order_index=idx,
+                    )
+                    for idx, source_program_id in enumerate(source_top_k_ids)
+                ],
+                session=session,
+            )
             session.commit()
         return new_id
 
@@ -655,7 +795,12 @@ class ProgramRepository:
             query = query.limit(limit)
         with self._session() as session:
             records = session.execute(query).scalars().all()
-        return [self._record_to_program(record).to_dict() for record in records if self._record_to_program(record) is not None]
+        inspiration_index = self._build_inspiration_index([record.id for record in records])
+        programs = [
+            self._record_to_program(record, inspiration_index=inspiration_index)
+            for record in records
+        ]
+        return [program.to_dict() for program in programs if program is not None]
 
     def list_embeddings_by_island(
         self,
@@ -966,7 +1111,11 @@ class ProgramRepository:
     def get_summaries(self) -> List[dict[str, Any]]:
         with self._session() as session:
             records = session.execute(select(ProgramRecord)).scalars().all()
-        return [self._record_to_summary(record) for record in records]
+        inspiration_index = self._build_inspiration_index([record.id for record in records])
+        return [
+            self._record_to_summary(record, inspiration_index=inspiration_index)
+            for record in records
+        ]
 
     def get_count_snapshot(self) -> ProgramCountSnapshot:
         with self._session() as session:

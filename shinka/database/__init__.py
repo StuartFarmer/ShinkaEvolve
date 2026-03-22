@@ -2,6 +2,7 @@ from .dbase import ProgramDatabase, Program, DatabaseConfig
 from .async_dbase import AsyncProgramDatabase
 from .repository import ProgramRepository, ProgramCountSnapshot
 from .repository_bundle import RepositoryBundle
+from .inspiration_repository import InspirationRepository, InspirationUse
 from .metadata_repository import MetadataRepository, RunMetadataSnapshot
 from .island_repository import IslandRepository, Island
 from .archive_policy import ArchivePolicy, FitnessArchivePolicy, CrowdingArchivePolicy, create_archive_policy
@@ -21,6 +22,8 @@ __all__ = [
     "AsyncProgramDatabase",
     "ProgramRepository",
     "RepositoryBundle",
+    "InspirationRepository",
+    "InspirationUse",
     "ProgramCountSnapshot",
     "MetadataRepository",
     "RunMetadataSnapshot",

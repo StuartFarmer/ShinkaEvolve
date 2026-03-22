@@ -51,7 +51,11 @@ class AsyncNoveltyJudge:
         self.num_islands = num_islands
 
     async def should_check_novelty_async(
-        self, code_embedding: List[float], current_gen: int, parent_program: Program, db
+        self,
+        code_embedding: List[float],
+        current_gen: int,
+        parent_program: Program,
+        island_manager=None,
     ) -> bool:
         """Async version of should_check_novelty.
 
@@ -67,10 +71,9 @@ class AsyncNoveltyJudge:
             # This needs to be done in main thread due to SQLite threading restrictions
             if (
                 parent_program.island_idx is not None
-                and hasattr(db, "island_manager")
-                and db.island_manager is not None
-                and hasattr(db.island_manager, "are_all_islands_initialized")
-                and db.island_manager.are_all_islands_initialized()
+                and island_manager is not None
+                and hasattr(island_manager, "are_all_islands_initialized")
+                and island_manager.are_all_islands_initialized()
             ):
                 return True
 
@@ -84,7 +87,6 @@ class AsyncNoveltyJudge:
         exec_fname: str,
         code_embedding: List[float],
         parent_program: Program,
-        db,
     ) -> Tuple[bool, Dict[str, Any]]:
         """Async version of novelty assessment matching sync runner logic.
 
@@ -92,8 +94,6 @@ class AsyncNoveltyJudge:
             exec_fname: Path to executable file
             code_embedding: Code embedding vector
             parent_program: Parent program
-            db: Database instance
-
         Returns:
             Tuple of (should_accept, novelty_metadata)
         """

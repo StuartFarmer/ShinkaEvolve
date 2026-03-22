@@ -21,13 +21,17 @@ from rich.console import Console
 from rich.table import Table
 import rich.box
 
-from shinka.database import ProgramDatabase, Program, ProgramRepository
+from shinka.database import Program, ProgramRepository
+from shinka.database.archive_policy import create_archive_policy
 from shinka.database.async_dbase import AsyncProgramDatabase
+from shinka.database.display import DatabaseDisplay
+from shinka.database.islands import CombinedIslandManager
 from shinka.database.prompt_dbase import (
     SystemPromptDatabase,
     SystemPromptConfig,
     create_system_prompt,
 )
+from shinka.database.repository_bundle import RepositoryBundle
 from shinka.llm import (
     AsyncLLMClient,
     extract_between,
@@ -36,7 +40,7 @@ from shinka.llm import (
     AsymmetricUCB,
     ThompsonSampler,
 )
-from shinka.embed import AsyncEmbeddingClient
+from shinka.embed import AsyncEmbeddingClient, EmbeddingClient
 from shinka.launch import JobScheduler, JobConfig
 from shinka.edit.async_apply import (
     apply_patch_async,
@@ -361,7 +365,18 @@ class ShinkaEvolveRunner:
 
         # Database-backed services are initialized in _setup_async() once the
         # results directory is finalized.
-        self.db = None
+        self.repository_bundle: Optional[RepositoryBundle] = None
+        self.program_repository: Optional[ProgramRepository] = None
+        self.metadata_repo = None
+        self.island_repo = None
+        self.archive_policy = None
+        self.island_manager: Optional[CombinedIslandManager] = None
+        self.database_display: Optional[DatabaseDisplay] = None
+        self.sync_embedding_client: Optional[EmbeddingClient] = None
+        self._sync_embedding_client_init_failed = False
+        self.runtime_last_iteration = 0
+        self.runtime_best_program_id: Optional[str] = None
+        self.runtime_beam_search_parent_id: Optional[str] = None
         self.async_db = None
         self.context_sampler = None
         self.initial_program_count_adjustment = 0
@@ -553,6 +568,103 @@ class ShinkaEvolveRunner:
             num_islands=self.num_islands,
             read_only=read_only,
         )
+
+    def _ensure_sync_embedding_client(self) -> Optional[EmbeddingClient]:
+        if not self.evo_config.embedding_model:
+            return None
+        if self.sync_embedding_client is not None:
+            return self.sync_embedding_client
+        if self._sync_embedding_client_init_failed:
+            return None
+        try:
+            self.sync_embedding_client = EmbeddingClient(
+                model_name=self.evo_config.embedding_model
+            )
+        except Exception as e:
+            self._sync_embedding_client_init_failed = True
+            logger.warning(
+                "Embedding client init failed for model '%s'; continuing without embedding recomputation: %s",
+                self.evo_config.embedding_model,
+                e,
+            )
+            return None
+        return self.sync_embedding_client
+
+    def _update_runtime_last_iteration(self, value: int) -> None:
+        self.runtime_last_iteration = max(self.runtime_last_iteration, int(value))
+        if self.program_repository is not None:
+            self.program_repository.last_iteration = self.runtime_last_iteration
+        if self.database_display is not None:
+            self.database_display.set_last_iteration(self.runtime_last_iteration)
+
+    def _update_runtime_beam_search_parent(self, parent_id: Optional[str]) -> None:
+        self.runtime_beam_search_parent_id = parent_id
+
+    def _set_initial_program_count_adjustment(self, adjustment: int) -> None:
+        adjustment = max(int(adjustment), 0)
+        self.initial_program_count_adjustment = adjustment
+        if self.metadata_repo is not None:
+            self.metadata_repo.set(
+                "initial_program_count_adjustment",
+                str(self.initial_program_count_adjustment),
+            )
+
+    def _all_islands_initialized(self) -> bool:
+        return bool(
+            self.island_manager is not None
+            and self.island_manager.are_all_islands_initialized()
+        )
+
+    def _print_database_summary(self) -> None:
+        if self.database_display is None:
+            return
+        self.database_display.set_default_console(self.console)
+        self.database_display.set_last_iteration(self.runtime_last_iteration)
+        self.database_display.print_summary(console=self.console)
+
+    def _build_runtime_services(self) -> None:
+        self.repository_bundle = RepositoryBundle.open(
+            db_path=self.db_path,
+            num_islands=self.num_islands,
+            read_only=False,
+        )
+        self.program_repository = self.repository_bundle.programs
+        self.metadata_repo = self.repository_bundle.metadata
+        self.island_repo = self.repository_bundle.islands
+
+        snapshot = self.metadata_repo.load_snapshot()
+        self.runtime_last_iteration = snapshot.last_iteration
+        self.runtime_best_program_id = snapshot.best_program_id
+        self.runtime_beam_search_parent_id = snapshot.beam_search_parent_id
+        self.initial_program_count_adjustment = (
+            snapshot.initial_program_count_adjustment
+        )
+
+        self.archive_policy = create_archive_policy(
+            archive_selection_strategy=self.archive_selection_strategy,
+            archive_size=self.archive_size,
+            archive_criteria=self.archive_criteria,
+        )
+        self.island_manager = CombinedIslandManager(
+            num_islands=self.num_islands,
+            migration_interval=self.migration_interval,
+            migration_rate=self.migration_rate,
+            island_elitism=self.island_elitism,
+            island_spawn_strategy=self.island_spawn_strategy,
+            island_spawn_subtree_size=self.island_spawn_subtree_size,
+            program_repository=self.program_repository,
+            island_repository=self.island_repo,
+            archive_policy=self.archive_policy,
+        )
+        self.database_display = DatabaseDisplay(
+            program_repository=self.program_repository,
+            archive_size=self.archive_size,
+            num_islands=self.num_islands,
+            island_manager=self.island_manager,
+            archive_policy=self.archive_policy,
+            default_console=self.console,
+        )
+        self.database_display.set_last_iteration(self.runtime_last_iteration)
 
     def _save_bandit_state(self) -> None:
         """Save the LLM selection bandit state to disk."""
@@ -893,38 +1005,7 @@ class ShinkaEvolveRunner:
 
         # Persist the run database inside the results directory.
         self.db_path = str(db_path)
-
-        # Reinitialize database with updated path
-        self.db = ProgramDatabase(
-            db_path=self.db_path,
-            num_islands=self.num_islands,
-            archive_size=self.archive_size,
-            migration_interval=self.migration_interval,
-            migration_rate=self.migration_rate,
-            island_elitism=self.island_elitism,
-            island_selection_strategy=self.island_selection_strategy,
-            enable_dynamic_islands=self.enable_dynamic_islands,
-            stagnation_threshold=self.stagnation_threshold,
-            island_spawn_strategy=self.island_spawn_strategy,
-            island_spawn_subtree_size=self.island_spawn_subtree_size,
-            parent_selection_strategy=self.parent_selection_strategy,
-            exploitation_alpha=self.exploitation_alpha,
-            exploitation_ratio=self.exploitation_ratio,
-            parent_selection_lambda=self.parent_selection_lambda,
-            num_beams=self.num_beams,
-            archive_selection_strategy=self.archive_selection_strategy,
-            archive_criteria=self.archive_criteria,
-            elite_selection_ratio=self.elite_selection_ratio,
-            num_archive_inspirations=self.num_archive_inspirations,
-            num_top_k_inspirations=self.num_top_k_inspirations,
-            enforce_island_separation=self.enforce_island_separation,
-            embedding_model=self.evo_config.embedding_model,
-        )
-        if hasattr(self.db, "set_display_console"):
-            self.db.set_display_console(self.console)
-        self.initial_program_count_adjustment = getattr(
-            self.db, "initial_program_count_adjustment", 0
-        )
+        self._build_runtime_services()
         self.async_db = AsyncProgramDatabase(
             db_path=self.db_path,
             num_islands=self.num_islands,
@@ -948,17 +1029,9 @@ class ShinkaEvolveRunner:
             enforce_island_separation=self.enforce_island_separation,
             elite_selection_ratio=self.elite_selection_ratio,
             embedding_model=self.evo_config.embedding_model or "",
-            ensure_embedding_client=self.db._ensure_embedding_client,
-            update_last_iteration=lambda value: setattr(
-                self.db,
-                "last_iteration",
-                max(getattr(self.db, "last_iteration", 0), value),
-            ),
-            update_beam_search_parent=lambda parent_id: setattr(
-                self.db,
-                "beam_search_parent_id",
-                parent_id,
-            ),
+            ensure_embedding_client=self._ensure_sync_embedding_client,
+            update_last_iteration=self._update_runtime_last_iteration,
+            update_beam_search_parent=self._update_runtime_beam_search_parent,
             max_workers=self.max_db_workers,
             enable_deadlock_debugging=self.enable_deadlock_debugging,
         )
@@ -984,14 +1057,14 @@ class ShinkaEvolveRunner:
             await self._setup_prompt_evolution()
 
         # Check if we're resuming from an existing database
-        resuming_run = db_path.exists() and self.db.last_iteration > 0
+        resuming_run = db_path.exists() and self.runtime_last_iteration > 0
 
         # Load bandit state if resuming
         if resuming_run:
             logger.info("=" * 80)
             logger.info("RESUMING PREVIOUS ASYNC EVOLUTION RUN")
             logger.info("=" * 80)
-            logger.info(f"Resuming from generation {self.db.last_iteration}")
+            logger.info(f"Resuming from generation {self.runtime_last_iteration}")
             program_count = await self.async_db.get_total_program_count_async()
             logger.info(f"Found {program_count} programs in database")
 
@@ -1004,7 +1077,7 @@ class ShinkaEvolveRunner:
             self._load_bandit_state()
 
             # Update state for resuming
-            self.completed_generations = self.db.last_iteration + 1
+            self.completed_generations = self.runtime_last_iteration + 1
             self.next_generation_to_submit = self.completed_generations
         else:
             # Generate or copy initial program only if NOT resuming
@@ -1415,10 +1488,9 @@ class ShinkaEvolveRunner:
             self.llm_selection.set_baseline_score(baseline_score)
 
         self.initial_program_count_adjustment = max(len(initial_programs) - 1, 0)
-        if self.db:
-            self.db.set_initial_program_count_adjustment(
-                self.initial_program_count_adjustment
-            )
+        self._set_initial_program_count_adjustment(
+            self.initial_program_count_adjustment
+        )
 
         self.completed_generations = 1
         self._record_progress()
@@ -2584,7 +2656,10 @@ class ShinkaEvolveRunner:
             # proposals are filtered out.
             if self.novelty_judge:
                 should_check = await self.novelty_judge.should_check_novelty_async(
-                    code_embedding, generation, parent_program, self.db
+                    code_embedding,
+                    generation,
+                    parent_program,
+                    self.island_manager,
                 )
 
                 if should_check:
@@ -2592,7 +2667,9 @@ class ShinkaEvolveRunner:
                         should_accept,
                         novelty_metadata,
                     ) = await self.novelty_judge.assess_novelty_with_rejection_sampling_async(
-                        exec_fname, code_embedding, parent_program, self.db
+                        exec_fname,
+                        code_embedding,
+                        parent_program,
                     )
 
                     # Update costs and metadata from novelty assessment (same as sync runner)
@@ -2615,11 +2692,9 @@ class ShinkaEvolveRunner:
                     # If not accepted, continue to next attempt (rejection sampling)
                 else:
                     proposal_accepted = True
-                    if not self.db.island_manager or not hasattr(
-                        self.db.island_manager, "are_all_islands_initialized"
-                    ):
+                    if self.island_manager is None:
                         self.novelty_judge.log_novelty_skip_message("no island manager")
-                    elif not self.db.island_manager.are_all_islands_initialized():
+                    elif not self.island_manager.are_all_islands_initialized():
                         self.novelty_judge.log_novelty_skip_message(
                             "not all islands initialized yet"
                         )
@@ -4012,7 +4087,7 @@ class ShinkaEvolveRunner:
                 )
 
             # Final recomputation of prompt percentiles to ensure fitness is accurate
-            if self.prompt_db is not None and self.db is not None:
+            if self.prompt_db is not None and self.program_repository is not None:
                 try:
                     # Get all correct program scores from main database
                     all_programs = self._list_all_programs_via_repository()
@@ -4039,6 +4114,9 @@ class ShinkaEvolveRunner:
 
             # Cleanup database
             await self.async_db.close_async()
+            if self.repository_bundle is not None:
+                self.repository_bundle.close()
+                self.repository_bundle = None
 
             # Cleanup scheduler
             self.scheduler.shutdown()
@@ -4092,9 +4170,9 @@ class ShinkaEvolveRunner:
             logger.info("Meta summary generation: SKIPPED (no meta summarizer)")
 
         # Print database summary
-        if self.db:
+        if self.database_display is not None:
             logger.info("-" * 40)
-            self.db.print_summary(console=self.console)
+            self._print_database_summary()
 
     def _print_metadata_table(self, meta_data: dict, generation: int = None):
         """Display metadata in a formatted rich table."""

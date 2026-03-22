@@ -491,6 +491,63 @@ class ProgramRepository:
             record = session.get(ProgramRecord, program_id)
         return self._record_to_program(record)
 
+    def get_inspiration_uses(
+        self,
+        child_program_id: str,
+        *,
+        role: Optional[str] = None,
+    ) -> List[InspirationUse]:
+        if self.inspiration_repo is None:
+            raise ConnectionError("Repository inspiration store not initialized.")
+        inspirations = self.inspiration_repo.list_for_child(child_program_id)
+        if role is not None:
+            inspirations = [insp for insp in inspirations if insp.role == role]
+        return inspirations
+
+    def get_inspiration_source_ids(
+        self,
+        child_program_id: str,
+        *,
+        role: Optional[str] = None,
+    ) -> List[str]:
+        if self.inspiration_repo is None:
+            raise ConnectionError("Repository inspiration store not initialized.")
+        return self.inspiration_repo.list_sources_for_child(
+            child_program_id,
+            role=role,
+        )
+
+    def get_inspired_child_ids(
+        self,
+        source_program_id: str,
+        *,
+        role: Optional[str] = None,
+    ) -> List[str]:
+        if self.inspiration_repo is None:
+            raise ConnectionError("Repository inspiration store not initialized.")
+        return self.inspiration_repo.list_children_for_source(
+            source_program_id,
+            role=role,
+        )
+
+    def count_inspiration_usage_by_source(
+        self,
+        source_program_id: str,
+        *,
+        role: Optional[str] = None,
+    ) -> int:
+        if self.inspiration_repo is None:
+            raise ConnectionError("Repository inspiration store not initialized.")
+        return self.inspiration_repo.count_usage_by_source(
+            source_program_id,
+            role=role,
+        )
+
+    def count_inspiration_usage_by_role(self, role: str) -> int:
+        if self.inspiration_repo is None:
+            raise ConnectionError("Repository inspiration store not initialized.")
+        return self.inspiration_repo.count_usage_by_role(role)
+
     def get_children_count(self, program_id: str) -> int:
         with self._session() as session:
             record = session.get(ProgramRecord, program_id)

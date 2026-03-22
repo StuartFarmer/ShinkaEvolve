@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from .models import ProgramInspirationRecord
@@ -130,3 +130,24 @@ class InspirationRepository:
                 query = query.where(ProgramInspirationRecord.role == role)
             rows = session.execute(query).all()
         return [str(child_program_id) for (child_program_id,) in rows]
+
+    def count_usage_by_source(
+        self,
+        source_program_id: str,
+        *,
+        role: Optional[str] = None,
+    ) -> int:
+        with self._managed_session() as session:
+            query = select(func.count()).select_from(ProgramInspirationRecord).where(
+                ProgramInspirationRecord.source_program_id == source_program_id
+            )
+            if role is not None:
+                query = query.where(ProgramInspirationRecord.role == role)
+            return int(session.scalar(query) or 0)
+
+    def count_usage_by_role(self, role: str) -> int:
+        with self._managed_session() as session:
+            query = select(func.count()).select_from(ProgramInspirationRecord).where(
+                ProgramInspirationRecord.role == role
+            )
+            return int(session.scalar(query) or 0)

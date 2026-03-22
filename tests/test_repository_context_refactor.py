@@ -145,6 +145,13 @@ def test_program_repository_persists_inspirations_in_join_table(tmp_path):
     summary = next(item for item in repo.get_summaries() if item["id"] == child.id)
     assert summary["archive_inspiration_ids"] == [source_a.id]
     assert summary["top_k_inspiration_ids"] == [source_b.id]
+    assert repo.get_inspiration_source_ids(child.id, role="archive") == [source_a.id]
+    assert repo.get_inspiration_source_ids(child.id, role="top_k") == [source_b.id]
+    assert repo.get_inspired_child_ids(source_a.id, role="archive") == [child.id]
+    assert repo.get_inspired_child_ids(source_b.id, role="top_k") == [child.id]
+    assert repo.count_inspiration_usage_by_source(source_a.id) == 1
+    assert repo.count_inspiration_usage_by_role("archive") == 1
+    assert repo.count_inspiration_usage_by_role("top_k") == 1
 
     repo.close()
 

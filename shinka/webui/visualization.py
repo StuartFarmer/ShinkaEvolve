@@ -453,7 +453,19 @@ class DatabaseRequestHandler(http.server.SimpleHTTPRequestHandler):
                     self.send_error(404, f"Program not found: {program_id}")
                     return
 
-                self.send_json_response(program.to_dict())
+                response = program.to_dict()
+                response["inspirations"] = [
+                    {
+                        "child_program_id": inspiration.child_program_id,
+                        "source_program_id": inspiration.source_program_id,
+                        "role": inspiration.role,
+                        "order_index": inspiration.order_index,
+                        "weight": inspiration.weight,
+                        "metadata": inspiration.metadata,
+                    }
+                    for inspiration in db.get_inspiration_uses(program_id)
+                ]
+                self.send_json_response(response)
                 return
 
             except (sqlite3.OperationalError, sqlite3.DatabaseError) as e:

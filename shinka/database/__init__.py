@@ -14,7 +14,6 @@ __all__ = [
     "create_archive_policy",
     "SimilarityService",
     "cosine_similarity",
-    "EmbeddingFeatureService",
     "SystemPromptDatabase",
     "SystemPrompt",
     "SystemPromptConfig",
@@ -40,7 +39,7 @@ def __getattr__(name):
 
         return AsyncProgramDatabase
     if name == "ProgramCountSnapshot":
-        from .repository import ProgramCountSnapshot
+        from shinka.controllers.types import ProgramCountSnapshot
 
         return ProgramCountSnapshot
     if name == "RepositoryBundle":
@@ -85,10 +84,6 @@ def __getattr__(name):
             "SimilarityService": SimilarityService,
             "cosine_similarity": cosine_similarity,
         }[name]
-    if name == "EmbeddingFeatureService":
-        from .embedding_feature_service import EmbeddingFeatureService
-
-        return EmbeddingFeatureService
     if name in {
         "SystemPromptDatabase",
         "SystemPrompt",

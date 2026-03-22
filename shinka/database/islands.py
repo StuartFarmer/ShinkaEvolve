@@ -12,7 +12,7 @@ from shinka.controllers.island_controller import IslandController
 
 if TYPE_CHECKING:
     from .archive_policy import ArchivePolicy
-    from .repository import ProgramRepository
+    from shinka.controllers.program_controller import ProgramController
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ class CombinedIslandManager:
         island_elitism: bool,
         island_spawn_strategy: str,
         island_spawn_subtree_size: int,
-        program_repository: "ProgramRepository",
+        program_repository: "ProgramController",
         island_controller: IslandController,
         archive_policy: "ArchivePolicy",
     ):

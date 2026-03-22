@@ -44,9 +44,6 @@ class RepositoryBundle:
             read_only=read_only,
         )
         controller = DatabaseController(connector)
-        if not read_only:
-            controller.programs._store._ensure_schema()
-            controller.programs._store._load_metadata()
         return cls(
             db_path=db_path,
             num_islands=num_islands,
@@ -72,4 +69,4 @@ class RepositoryBundle:
         return self.controller.programs
 
     def close(self) -> None:
-        self.controller.programs.close()
+        self.controller.close()

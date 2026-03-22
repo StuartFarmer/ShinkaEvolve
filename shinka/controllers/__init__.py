@@ -8,6 +8,7 @@ __all__ = [
     "RunStateController",
     "InspirationUse",
     "Island",
+    "ProgramCountSnapshot",
     "RunMetadataSnapshot",
 ]
 
@@ -41,12 +42,13 @@ def __getattr__(name):
         from .run_state_controller import RunStateController
 
         return RunStateController
-    if name in {"InspirationUse", "Island", "RunMetadataSnapshot"}:
-        from .types import InspirationUse, Island, RunMetadataSnapshot
+    if name in {"InspirationUse", "Island", "ProgramCountSnapshot", "RunMetadataSnapshot"}:
+        from .types import InspirationUse, Island, ProgramCountSnapshot, RunMetadataSnapshot
 
         return {
             "InspirationUse": InspirationUse,
             "Island": Island,
+            "ProgramCountSnapshot": ProgramCountSnapshot,
             "RunMetadataSnapshot": RunMetadataSnapshot,
         }[name]
     raise AttributeError(name)

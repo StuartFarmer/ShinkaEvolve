@@ -8,7 +8,7 @@ import numpy as np
 from shinka.controllers.types import Island
 
 if TYPE_CHECKING:
-    from .repository import ProgramRepository
+    from shinka.controllers.program_controller import ProgramController
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +18,7 @@ class IslandSampler(ABC):
 
     def __init__(
         self,
-        program_repository: "ProgramRepository",
+        program_repository: "ProgramController",
     ):
         self.program_repository = program_repository
 
@@ -88,7 +88,7 @@ class ProportionalIslandSampler(IslandSampler):
 
     def __init__(
         self,
-        program_repository: "ProgramRepository",
+        program_repository: "ProgramController",
         temperature: float = 1.0,
     ):
         super().__init__(program_repository)
@@ -125,7 +125,7 @@ class WeightedIslandSampler(IslandSampler):
 
     def __init__(
         self,
-        program_repository: "ProgramRepository",
+        program_repository: "ProgramController",
         fitness_weight: float = 1.0,
         count_weight: float = 1.0,
     ):
@@ -169,7 +169,7 @@ class WeightedIslandSampler(IslandSampler):
 
 
 def create_island_sampler(
-    program_repository: "ProgramRepository",
+    program_repository: "ProgramController",
     strategy: str = "uniform",
 ) -> IslandSampler:
     """Factory function to create island samplers.

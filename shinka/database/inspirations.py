@@ -12,7 +12,7 @@ import warnings
 from typing import Any, Callable, List, Literal, Optional
 
 from .archive_policy import create_archive_policy
-from shinka.controllers import ProgramController
+from shinka.controllers import DatabaseController, ProgramController
 from .connector import DatabaseConnector
 from shinka.core.search_policies import InspirationSelector as RepositoryInspirationSelector
 
@@ -59,18 +59,18 @@ class CombinedContextSelector:
                 "Legacy CombinedContextSelector requires config.db_path for repository-backed sampling."
             )
         warnings.warn(
-            "CombinedContextSelector is deprecated; use ProgramRepository + "
+            "CombinedContextSelector is deprecated; use DatabaseController().programs + "
             "shinka.core.search_policies.InspirationSelector directly.",
             DeprecationWarning,
             stacklevel=2,
         )
-        return ProgramController(
+        return DatabaseController(
             DatabaseConnector.open(
                 db_path=self.db_path,
                 num_islands=self.num_islands,
                 read_only=True,
             )
-        )
+        ).programs
 
     def sample_context(
         self, parent: Any, num_archive: int, num_topk: int

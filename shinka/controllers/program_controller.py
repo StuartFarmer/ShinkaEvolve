@@ -4,6 +4,8 @@ from shinka.database.connector import DatabaseConnector
 from .embedding_controller import EmbeddingController
 from .inspiration_controller import InspirationController
 from .metadata_controller import MetadataController
+from .program_mutation_controller import ProgramMutationController
+from .program_query_controller import ProgramQueryController
 from .run_state_controller import RunStateController
 
 
@@ -11,21 +13,21 @@ class ProgramController:
     """Public CRUD/query controller facade for programs."""
 
     def __init__(self, connector: DatabaseConnector) -> None:
-        from shinka.database.repository import ProgramRepository
-
         self.connector = connector
+        self.num_islands = connector.num_islands
         self.run_state = RunStateController(connector)
         self.metadata = MetadataController(connector)
         self.inspirations = InspirationController(connector)
         self.embeddings = EmbeddingController(connector)
-        self._store = ProgramRepository.from_existing_connection(
-            db_path=connector.db_path,
-            num_islands=connector.num_islands,
-            conn=connector.conn,
-            cursor=connector.cursor,
-            read_only=connector.read_only,
-            ensure_schema=not connector.read_only,
-        )
+        self.run_state_controller = self.run_state
+        self.metadata_controller = self.metadata
+        self.inspiration_controller = self.inspirations
+        self.embedding_controller = self.embeddings
+        self.query = ProgramQueryController(connector)
+        self.mutations = ProgramMutationController(connector)
+        snapshot = self.run_state.load_snapshot()
+        self.last_iteration = snapshot.last_iteration
+        self.best_program_id = snapshot.best_program_id
 
     def get_metadata(self, key: str, default=None):
         if key in RunStateController.SUPPORTED_KEYS:
@@ -35,8 +37,19 @@ class ProgramController:
     def set_metadata(self, key: str, value):
         if key in RunStateController.SUPPORTED_KEYS:
             self.run_state.set(key, value)
+            if key == "last_iteration":
+                self.last_iteration = 0 if value is None else int(value)
+            elif key == "best_program_id":
+                self.best_program_id = value
             return
         self.metadata.set(key, value)
+
+    def add(self, program, *, verbose: bool = False):
+        program_id = self.mutations.add(program, verbose=verbose)
+        self.last_iteration = max(self.last_iteration, int(program.generation))
+        best_program = self.query.get_best()
+        self.best_program_id = None if best_program is None else best_program.id
+        return program_id
 
     def get_inspiration_uses(self, child_program_id: str, *, role=None):
         inspirations = self.inspirations.list_for_child(child_program_id)
@@ -77,5 +90,12 @@ class ProgramController:
             embedding_cluster_id=embedding_cluster_id,
         )
 
+    def close(self) -> None:
+        self.connector.close()
+
     def __getattr__(self, name):
-        return getattr(self._store, name)
+        if hasattr(self.query, name):
+            return getattr(self.query, name)
+        if hasattr(self.mutations, name):
+            return getattr(self.mutations, name)
+        raise AttributeError(name)

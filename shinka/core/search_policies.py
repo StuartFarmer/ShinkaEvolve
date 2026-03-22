@@ -14,7 +14,7 @@ from typing import Any, List, Optional, Sequence
 import numpy as np
 
 from shinka.database.program import Program
-from shinka.database.repository import ProgramRepository
+from shinka.controllers.program_controller import ProgramController
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,7 @@ class ParentSelector:
 
     def has_correct_programs(
         self,
-        repository: ProgramRepository,
+        repository: ProgramController,
         *,
         island_idx: Optional[int] = None,
     ) -> bool:
@@ -79,7 +79,7 @@ class ParentSelector:
 
     def get_incorrect_program_for_fix(
         self,
-        repository: ProgramRepository,
+        repository: ProgramController,
         *,
         island_idx: Optional[int] = None,
     ) -> Optional[Program]:
@@ -90,7 +90,7 @@ class ParentSelector:
 
     def select_with_fix_mode(
         self,
-        repository: ProgramRepository,
+        repository: ProgramController,
         archive_programs: Sequence[Program],
         *,
         island_idx: Optional[int] = None,
@@ -107,7 +107,7 @@ class ParentSelector:
 
     def select(
         self,
-        repository: ProgramRepository,
+        repository: ProgramController,
         archive_programs: Sequence[Program],
         *,
         island_idx: Optional[int] = None,
@@ -154,14 +154,14 @@ class ParentSelector:
 
     def _correct_candidates(
         self,
-        repository: ProgramRepository,
+        repository: ProgramController,
         island_idx: Optional[int],
     ) -> List[Program]:
         return _sort_programs_by_score(repository.list_correct(island_idx=island_idx))
 
     def _select_power_law(
         self,
-        repository: ProgramRepository,
+        repository: ProgramController,
         archive_programs: Sequence[Program],
         island_idx: Optional[int],
     ) -> Optional[Program]:
@@ -177,7 +177,7 @@ class ParentSelector:
 
     def _select_weighted(
         self,
-        repository: ProgramRepository,
+        repository: ProgramController,
         archive_programs: Sequence[Program],
         island_idx: Optional[int],
     ) -> Optional[Program]:
@@ -210,7 +210,7 @@ class ParentSelector:
 
     def _select_beam_search(
         self,
-        repository: ProgramRepository,
+        repository: ProgramController,
         island_idx: Optional[int],
     ) -> Optional[Program]:
         num_beams = int(self.num_beams)
@@ -234,7 +234,7 @@ class ParentSelector:
 
     def _select_best_of_n(
         self,
-        repository: ProgramRepository,
+        repository: ProgramController,
         island_idx: Optional[int],
     ) -> Optional[Program]:
         programs = repository.list_by_island(island_idx, correct_only=True) if island_idx is not None else repository.list_correct()
@@ -251,7 +251,7 @@ class ParentSelector:
 
     def _select_winner_take_all(
         self,
-        repository: ProgramRepository,
+        repository: ProgramController,
         island_idx: Optional[int],
     ) -> Optional[Program]:
         best = repository.get_best(island_idx=island_idx)
@@ -261,7 +261,7 @@ class ParentSelector:
 
     def _select_sequential(
         self,
-        repository: ProgramRepository,
+        repository: ProgramController,
         island_idx: Optional[int],
     ) -> Optional[Program]:
         program = repository.get_most_recent(correct_only=True, island_idx=island_idx)
@@ -284,7 +284,7 @@ class InspirationSelector:
 
     def select_archive(
         self,
-        repository: ProgramRepository,
+        repository: ProgramController,
         parent: Program,
         archive_programs: Sequence[Program],
         *,

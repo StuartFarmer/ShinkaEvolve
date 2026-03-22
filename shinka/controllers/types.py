@@ -35,3 +35,9 @@ class RunMetadataSnapshot:
     best_score_generation: int = 0
     best_score_ever: Optional[float] = None
     initial_program_count_adjustment: int = 0
+
+
+@dataclass(frozen=True)
+class ProgramCountSnapshot:
+    count: int
+    max_timestamp: float | None

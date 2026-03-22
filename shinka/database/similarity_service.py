@@ -8,7 +8,7 @@ import numpy as np
 
 if TYPE_CHECKING:
     from .program import Program
-    from .repository import ProgramRepository
+    from shinka.controllers.program_controller import ProgramController
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ class SimilarityService:
     policy; callers decide what to do with the returned similarities.
     """
 
-    def __init__(self, repository: "ProgramRepository"):
+    def __init__(self, repository: "ProgramController"):
         self.repository = repository
 
     def compute_similarity(

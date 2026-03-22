@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from shinka.core.async_runner import ShinkaEvolveRunner
-from shinka.controllers import ProgramController
+from shinka.controllers import DatabaseController
 from shinka.database import Program
 from shinka.database.connector import DatabaseConnector
 
@@ -14,7 +14,7 @@ def test_explicit_island_assignment_is_preserved():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "explicit_island.db"
         connector = DatabaseConnector.open(db_path=str(db_path), num_islands=3, read_only=False)
-        db = ProgramController(connector)
+        db = DatabaseController(connector).programs
 
         seeded_program = Program(
             id="seed_program",
@@ -28,9 +28,9 @@ def test_explicit_island_assignment_is_preserved():
 
         try:
             db.add(seeded_program)
-            repo = ProgramController(
+            repo = DatabaseController(
                 DatabaseConnector.open(db_path=str(db_path), num_islands=3, read_only=True)
-            )
+            ).programs
             stored_program = repo.get("seed_program")
             assert stored_program is not None
             assert stored_program.island_idx == 2

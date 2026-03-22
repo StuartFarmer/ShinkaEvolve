@@ -33,6 +33,7 @@ from shinka.controllers.island_controller import IslandController
 from shinka.controllers.embedding_controller import EmbeddingController
 from shinka.controllers.inspiration_controller import InspirationController
 from shinka.controllers.metadata_controller import MetadataController
+from shinka.controllers.program_hydration_controller import ProgramHydrationController
 from shinka.controllers.run_state_controller import RunStateController
 from shinka.controllers.types import InspirationUse, Island
 from .complexity import analyze_code_metrics
@@ -104,6 +105,7 @@ class ProgramRepository:
         self.metadata_controller: MetadataController | None = None
         self.inspiration_controller: InspirationController | None = None
         self.embedding_controller: EmbeddingController | None = None
+        self.hydration_controller: ProgramHydrationController | None = None
 
         self._connect()
         self._ensure_schema()
@@ -151,6 +153,7 @@ class ProgramRepository:
         repo.metadata_controller = MetadataController(repo.connector)
         repo.inspiration_controller = InspirationController(repo.connector)
         repo.embedding_controller = EmbeddingController(repo.connector)
+        repo.hydration_controller = ProgramHydrationController(repo.connector)
         repo.island_controller = IslandController(repo.connector)
         if ensure_schema and not read_only:
             repo._ensure_schema()
@@ -171,6 +174,7 @@ class ProgramRepository:
         self.metadata_controller = MetadataController(self.connector)
         self.inspiration_controller = InspirationController(self.connector)
         self.embedding_controller = EmbeddingController(self.connector)
+        self.hydration_controller = ProgramHydrationController(self.connector)
         self.island_controller = IslandController(self.connector)
 
     def _ensure_schema(self) -> None:
@@ -234,23 +238,9 @@ class ProgramRepository:
         self,
         child_program_ids: Sequence[str],
     ) -> Dict[str, Dict[str, List[str]]]:
-        if self.inspiration_controller is None:
-            raise ConnectionError("Repository inspiration controller not initialized.")
-        uses_by_child = self.inspiration_controller.list_for_children(child_program_ids)
-        index: Dict[str, Dict[str, List[str]]] = {
-            child_id: {"archive": [], "top_k": [], "ancestor": []}
-            for child_id in child_program_ids
-        }
-        for child_id, inspirations in uses_by_child.items():
-            for inspiration in inspirations:
-                role_bucket = index.setdefault(
-                    child_id,
-                    {"archive": [], "top_k": [], "ancestor": []},
-                )
-                role_bucket.setdefault(inspiration.role, []).append(
-                    inspiration.source_program_id
-                )
-        return index
+        if self.hydration_controller is None:
+            raise ConnectionError("Repository hydration controller not initialized.")
+        return self.hydration_controller.build_inspiration_index(child_program_ids)
 
     def _program_inspiration_uses(self, program: Program) -> List[InspirationUse]:
         inspirations: List[InspirationUse] = []
@@ -278,66 +268,33 @@ class ProgramRepository:
         self,
         program_ids: Sequence[str],
     ) -> Dict[str, ProgramEvaluationRecord]:
-        ids = [program_id for program_id in program_ids if program_id]
-        if not ids:
-            return {}
-        with self._session() as session:
-            records = session.execute(
-                select(ProgramEvaluationRecord).where(
-                    ProgramEvaluationRecord.program_id.in_(ids)
-                )
-            ).scalars().all()
-        return {record.program_id: record for record in records}
+        if self.hydration_controller is None:
+            raise ConnectionError("Repository hydration controller not initialized.")
+        return self.hydration_controller.build_evaluation_index(program_ids)
 
     def _build_proposal_index(
         self,
         program_ids: Sequence[str],
     ) -> Dict[str, ProgramProposalRecord]:
-        ids = [program_id for program_id in program_ids if program_id]
-        if not ids:
-            return {}
-        with self._session() as session:
-            records = session.execute(
-                select(ProgramProposalRecord).where(
-                    ProgramProposalRecord.program_id.in_(ids)
-                )
-            ).scalars().all()
-        return {record.program_id: record for record in records}
+        if self.hydration_controller is None:
+            raise ConnectionError("Repository hydration controller not initialized.")
+        return self.hydration_controller.build_proposal_index(program_ids)
 
     def _build_embedding_index(
         self,
         program_ids: Sequence[str],
     ) -> Dict[str, ProgramEmbeddingRecord]:
-        ids = [program_id for program_id in program_ids if program_id]
-        if not ids:
-            return {}
-        with self._session() as session:
-            records = session.execute(
-                select(ProgramEmbeddingRecord).where(
-                    ProgramEmbeddingRecord.program_id.in_(ids)
-                )
-            ).scalars().all()
-        return {record.program_id: record for record in records}
+        if self.hydration_controller is None:
+            raise ConnectionError("Repository hydration controller not initialized.")
+        return self.hydration_controller.build_embedding_index(program_ids)
 
     def _build_projection_index(
         self,
         program_ids: Sequence[str],
     ) -> Dict[str, Dict[str, ProgramEmbeddingProjectionRecord]]:
-        ids = [program_id for program_id in program_ids if program_id]
-        if not ids:
-            return {}
-        with self._session() as session:
-            records = session.execute(
-                select(ProgramEmbeddingProjectionRecord).where(
-                    ProgramEmbeddingProjectionRecord.program_id.in_(ids)
-                )
-            ).scalars().all()
-        index: Dict[str, Dict[str, ProgramEmbeddingProjectionRecord]] = {
-            program_id: {} for program_id in ids
-        }
-        for record in records:
-            index.setdefault(record.program_id, {})[record.kind] = record
-        return index
+        if self.hydration_controller is None:
+            raise ConnectionError("Repository hydration controller not initialized.")
+        return self.hydration_controller.build_projection_index(program_ids)
 
     def _record_to_program(
         self,
@@ -349,66 +306,15 @@ class ProgramRepository:
         embedding_index: Optional[Dict[str, ProgramEmbeddingRecord]] = None,
         projection_index: Optional[Dict[str, Dict[str, ProgramEmbeddingProjectionRecord]]] = None,
     ) -> Optional[Program]:
-        if record is None:
-            return None
-        if evaluation_index is None:
-            evaluation_index = self._build_evaluation_index([record.id])
-        if proposal_index is None:
-            proposal_index = self._build_proposal_index([record.id])
-        if embedding_index is None:
-            embedding_index = self._build_embedding_index([record.id])
-        if projection_index is None:
-            projection_index = self._build_projection_index([record.id])
-        inspiration_lists = (
-            inspiration_index.get(record.id, {})
-            if inspiration_index is not None
-            else self._build_inspiration_index([record.id]).get(record.id, {})
-        )
-        evaluation = evaluation_index.get(record.id)
-        proposal = proposal_index.get(record.id)
-        embedding = embedding_index.get(record.id)
-        projections = projection_index.get(record.id, {})
-        projection_2d = projections.get("pca_2d")
-        projection_3d = projections.get("pca_3d")
-        diagnostics = (
-            dict(evaluation.diagnostics_json or {})
-            if evaluation is not None
-            else {}
-        )
-        metadata = dict(record.program_metadata or {})
-        if diagnostics.get("code_analysis_metrics") and "code_analysis_metrics" not in metadata:
-            metadata["code_analysis_metrics"] = diagnostics["code_analysis_metrics"]
-        return Program.from_dict(
-            {
-                "id": record.id,
-                "code": record.code,
-                "language": record.language,
-                "parent_id": record.parent_id,
-                "archive_inspiration_ids": inspiration_lists.get("archive", []),
-                "top_k_inspiration_ids": inspiration_lists.get("top_k", []),
-                "generation": record.generation,
-                "timestamp": record.timestamp,
-                "code_diff": proposal.code_diff if proposal is not None else None,
-                "combined_score": evaluation.combined_score if evaluation is not None else 0.0,
-                "public_metrics": evaluation.public_metrics_json if evaluation is not None else {},
-                "private_metrics": evaluation.private_metrics_json if evaluation is not None else {},
-                "text_feedback": evaluation.text_feedback if evaluation is not None else "",
-                "complexity": evaluation.complexity if evaluation is not None else 0.0,
-                "embedding": embedding.vector_json if embedding is not None else [],
-                "embedding_pca_2d": projection_2d.coords_json if projection_2d is not None else [],
-                "embedding_pca_3d": projection_3d.coords_json if projection_3d is not None else [],
-                "embedding_cluster_id": (
-                    projection_3d.cluster_id
-                    if projection_3d is not None and projection_3d.cluster_id is not None
-                    else (projection_2d.cluster_id if projection_2d is not None else None)
-                ),
-                "correct": bool(evaluation.correct) if evaluation is not None else False,
-                "children_count": record.children_count,
-                "metadata": metadata,
-                "island_idx": record.island_idx,
-                "migration_history": record.migration_history or [],
-                "system_prompt_id": record.system_prompt_id,
-            }
+        if self.hydration_controller is None:
+            raise ConnectionError("Repository hydration controller not initialized.")
+        return self.hydration_controller.record_to_program(
+            record,
+            inspiration_index=inspiration_index,
+            evaluation_index=evaluation_index,
+            proposal_index=proposal_index,
+            embedding_index=embedding_index,
+            projection_index=projection_index,
         )
 
     def _record_to_summary(
@@ -420,57 +326,15 @@ class ProgramRepository:
         proposal_index: Optional[Dict[str, ProgramProposalRecord]] = None,
         projection_index: Optional[Dict[str, Dict[str, ProgramEmbeddingProjectionRecord]]] = None,
     ) -> dict[str, Any]:
-        if evaluation_index is None:
-            evaluation_index = self._build_evaluation_index([record.id])
-        if proposal_index is None:
-            proposal_index = self._build_proposal_index([record.id])
-        if projection_index is None:
-            projection_index = self._build_projection_index([record.id])
-        inspiration_lists = (
-            inspiration_index.get(record.id, {})
-            if inspiration_index is not None
-            else self._build_inspiration_index([record.id]).get(record.id, {})
+        if self.hydration_controller is None:
+            raise ConnectionError("Repository hydration controller not initialized.")
+        return self.hydration_controller.record_to_summary(
+            record,
+            inspiration_index=inspiration_index,
+            evaluation_index=evaluation_index,
+            proposal_index=proposal_index,
+            projection_index=projection_index,
         )
-        evaluation = evaluation_index.get(record.id)
-        proposal = proposal_index.get(record.id)
-        projections = projection_index.get(record.id, {})
-        projection_2d = projections.get("pca_2d")
-        projection_3d = projections.get("pca_3d")
-        diagnostics = (
-            dict(evaluation.diagnostics_json or {})
-            if evaluation is not None
-            else {}
-        )
-        metadata = dict(record.program_metadata or {})
-        if diagnostics.get("code_analysis_metrics") and "code_analysis_metrics" not in metadata:
-            metadata["code_analysis_metrics"] = diagnostics["code_analysis_metrics"]
-        return {
-            "id": record.id,
-            "parent_id": record.parent_id,
-            "generation": record.generation,
-            "timestamp": record.timestamp,
-            "combined_score": evaluation.combined_score if evaluation is not None else None,
-            "correct": bool(evaluation.correct) if evaluation is not None else False,
-            "complexity": evaluation.complexity if evaluation is not None else 0.0,
-            "island_idx": record.island_idx,
-            "children_count": record.children_count,
-            "public_metrics": evaluation.public_metrics_json if evaluation is not None else {},
-            "private_metrics": evaluation.private_metrics_json if evaluation is not None else {},
-            "metadata": metadata,
-            "embedding_pca_2d": projection_2d.coords_json if projection_2d is not None else [],
-            "embedding_pca_3d": projection_3d.coords_json if projection_3d is not None else [],
-            "embedding_cluster_id": (
-                projection_3d.cluster_id
-                if projection_3d is not None and projection_3d.cluster_id is not None
-                else (projection_2d.cluster_id if projection_2d is not None else None)
-            ),
-            "language": record.language,
-            "code_diff": proposal.code_diff if proposal is not None else None,
-            "top_k_inspiration_ids": inspiration_lists.get("top_k", []),
-            "archive_inspiration_ids": inspiration_lists.get("archive", []),
-            "migration_history": record.migration_history or [],
-            "in_archive": False,
-        }
 
     def _program_query(
         self,

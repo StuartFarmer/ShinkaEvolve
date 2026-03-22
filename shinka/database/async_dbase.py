@@ -14,10 +14,9 @@ from concurrent.futures import ThreadPoolExecutor
 from .complexity import analyze_code_metrics
 from .program import Program
 from .archive_policy import create_archive_policy
-from .embedding_feature_service import EmbeddingFeatureService
 from .islands import CombinedIslandManager
 from .program_write_service import ProgramWriteService
-from shinka.controllers import ProgramController
+from shinka.controllers import DatabaseController, EmbeddingController, ProgramController
 from .connector import DatabaseConnector
 from .repository_bundle import RepositoryBundle
 
@@ -193,13 +192,13 @@ class AsyncProgramDatabase:
             db_debugger.track_end(op_id, success=success)
 
     def _open_repository(self, *, read_only: bool) -> ProgramController:
-        return ProgramController(
+        return DatabaseController(
             DatabaseConnector.open(
                 db_path=self.db_path,
                 num_islands=self.num_islands,
                 read_only=read_only,
             )
-        )
+        ).programs
 
     async def _deadlock_monitor(self):
         """Background task to monitor for deadlocks."""
@@ -668,14 +667,13 @@ class AsyncProgramDatabase:
             maybe_spawn_island=maybe_spawn_island,
         )
 
-    def _build_thread_embedding_service(
+    def _build_thread_embedding_controller(
         self,
         bundle: RepositoryBundle,
-    ) -> EmbeddingFeatureService:
-        return EmbeddingFeatureService(
-            bundle.programs,
+    ) -> EmbeddingController:
+        return EmbeddingController(
+            bundle.connector,
             embedding_client_factory=self.ensure_embedding_client,
-            read_only=False,
         )
 
     async def _add_program_fast_async(self, program: Program):
@@ -757,8 +755,8 @@ class AsyncProgramDatabase:
                 num_islands=self.num_islands,
                 read_only=False,
             )
-            service = self._build_thread_embedding_service(bundle)
-            service.recompute()
+            controller = self._build_thread_embedding_controller(bundle)
+            controller.recompute()
         finally:
             if bundle:
                 try:

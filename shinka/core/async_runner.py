@@ -21,7 +21,7 @@ from rich.console import Console
 from rich.table import Table
 import rich.box
 
-from shinka.controllers import ProgramController
+from shinka.controllers import DatabaseController, ProgramController
 from shinka.database import Program
 from shinka.database.connector import DatabaseConnector
 from shinka.database.archive_policy import create_archive_policy
@@ -565,13 +565,13 @@ class ShinkaEvolveRunner:
             )
 
     def _open_repository(self, *, read_only: bool) -> ProgramController:
-        return ProgramController(
+        return DatabaseController(
             DatabaseConnector.open(
                 db_path=self.db_path,
                 num_islands=self.num_islands,
                 read_only=read_only,
             )
-        )
+        ).programs
 
     def _ensure_sync_embedding_client(self) -> Optional[EmbeddingClient]:
         if not self.evo_config.embedding_model:

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import logging
 import math
 import uuid
 from contextlib import contextmanager
-from typing import Any, List
+from typing import Any, Callable, List, Optional
 
 import numpy as np
 from sqlalchemy import select
@@ -15,6 +16,10 @@ from shinka.database.models import (
     ProgramEmbeddingRecord,
     ProgramRecord,
 )
+from shinka.embed import EmbeddingClient
+
+
+logger = logging.getLogger(__name__)
 
 
 def _clean_nan_values(obj: Any) -> Any:
@@ -38,10 +43,16 @@ def _clean_nan_values(obj: Any) -> Any:
 class EmbeddingController:
     """Controller for program embeddings and derived projections."""
 
-    def __init__(self, connector: DatabaseConnector) -> None:
+    def __init__(
+        self,
+        connector: DatabaseConnector,
+        *,
+        embedding_client_factory: Callable[[], Optional[EmbeddingClient]] | None = None,
+    ) -> None:
         self.connector = connector
         self._session_factory = connector.SessionLocal
         self.read_only = connector.read_only
+        self.embedding_client_factory = embedding_client_factory
 
     @contextmanager
     def _managed_session(self, session: Session | None = None):
@@ -86,6 +97,64 @@ class EmbeddingController:
             for program_id, embedding in rows
             if embedding not in (None, [])
         ]
+
+    def recompute(self, num_clusters: int = 4) -> None:
+        if self.read_only:
+            return
+
+        rows = self.list_all()
+        if len(rows) < num_clusters:
+            if rows:
+                logger.info(
+                    "Not enough programs with embeddings (%s) to perform clustering. Need at least %s.",
+                    len(rows),
+                    num_clusters,
+                )
+            return
+
+        if self.embedding_client_factory is None:
+            return
+
+        embedding_client = self.embedding_client_factory()
+        if embedding_client is None:
+            return
+
+        program_ids = [program_id for program_id, _ in rows]
+        embeddings = [embedding for _, embedding in rows]
+
+        try:
+            logger.info(
+                "Recomputing PCA-reduced embedding features for %s programs.",
+                len(program_ids),
+            )
+            reduced_2d = embedding_client.get_dim_reduction(
+                embeddings, method="pca", dims=2
+            )
+            reduced_3d = embedding_client.get_dim_reduction(
+                embeddings, method="pca", dims=3
+            )
+            cluster_ids = embedding_client.get_embedding_clusters(
+                embeddings, num_clusters=num_clusters
+            )
+        except Exception as e:
+            logger.error("Failed to recompute embedding features: %s", e)
+            return
+
+        try:
+            for i, program_id in enumerate(program_ids):
+                self.update_features(
+                    program_id=program_id,
+                    embedding_pca_2d=reduced_2d[i].tolist(),
+                    embedding_pca_3d=reduced_3d[i].tolist(),
+                    embedding_cluster_id=int(cluster_ids[i]),
+                )
+            logger.info(
+                "Successfully updated embedding features for %s programs.",
+                len(program_ids),
+            )
+        except Exception as e:
+            logger.error("Failed to update programs with new embedding features: %s", e)
+            raise
 
     def update_features(
         self,

@@ -24,7 +24,7 @@ import urllib.parse
 import webbrowser
 from typing import Optional, Dict, Any, Tuple
 
-from shinka.controllers import ProgramController
+from shinka.controllers import DatabaseController
 from shinka.database.connector import DatabaseConnector
 from shinka.database import SystemPromptConfig, SystemPromptDatabase
 
@@ -230,17 +230,9 @@ class DatabaseRequestHandler(http.server.SimpleHTTPRequestHandler):
         for i in range(max_retries):
             db = None
             try:
-                db = ProgramController(
+                db = DatabaseController(
                     DatabaseConnector.open(db_path=abs_db_path, read_only=True)
-                )
-
-                # Set WAL mode compatible settings for read-only connections
-                # Longer busy_timeout for concurrent access during evolution
-                if db.cursor:
-                    db.cursor.execute(
-                        "PRAGMA busy_timeout = 30000;"
-                    )  # 30 second timeout
-                    db.cursor.execute("PRAGMA journal_mode = WAL;")  # Ensure WAL mode
+                ).programs
 
                 programs = db.list_all()
 
@@ -321,13 +313,9 @@ class DatabaseRequestHandler(http.server.SimpleHTTPRequestHandler):
         for i in range(max_retries):
             db = None
             try:
-                db = ProgramController(
+                db = DatabaseController(
                     DatabaseConnector.open(db_path=abs_db_path, read_only=True)
-                )
-
-                if db.cursor:
-                    db.cursor.execute("PRAGMA busy_timeout = 30000;")
-                    db.cursor.execute("PRAGMA journal_mode = WAL;")
+                ).programs
 
                 summaries = db.get_summaries()
                 self.send_json_response(summaries)
@@ -386,12 +374,9 @@ class DatabaseRequestHandler(http.server.SimpleHTTPRequestHandler):
         for i in range(max_retries):
             db = None
             try:
-                db = ProgramController(
+                db = DatabaseController(
                     DatabaseConnector.open(db_path=abs_db_path, read_only=True)
-                )
-
-                if db.cursor:
-                    db.cursor.execute("PRAGMA busy_timeout = 30000;")
+                ).programs
 
                 snapshot = db.get_count_snapshot()
                 result = {
@@ -450,12 +435,9 @@ class DatabaseRequestHandler(http.server.SimpleHTTPRequestHandler):
         for i in range(max_retries):
             db = None
             try:
-                db = ProgramController(
+                db = DatabaseController(
                     DatabaseConnector.open(db_path=abs_db_path, read_only=True)
-                )
-
-                if db.cursor:
-                    db.cursor.execute("PRAGMA busy_timeout = 30000;")
+                ).programs
 
                 program = db.get(program_id)
                 if program is None:

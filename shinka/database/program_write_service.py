@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Callable, Optional
 if TYPE_CHECKING:
     from .program import Program
     from .islands import CombinedIslandManager
-    from .repository import ProgramRepository
+    from shinka.controllers.program_controller import ProgramController
 
 
 @dataclass(frozen=True)
@@ -25,7 +25,7 @@ class ProgramWriteService:
     program to the system:
 
     - assign island
-    - persist program through `ProgramRepository`
+    - persist program through `ProgramController`
     - run best/generation tracking callbacks
     - run island-copy / spawn / migration side effects
     - run optional post-write hooks like embedding recomputation or summaries
@@ -34,7 +34,7 @@ class ProgramWriteService:
     def __init__(
         self,
         *,
-        program_repository: "ProgramRepository",
+        program_repository: "ProgramController",
         island_manager: "CombinedIslandManager",
         update_best_program: Callable[["Program"], None],
         update_metadata: Callable[[str, Optional[str]], None],

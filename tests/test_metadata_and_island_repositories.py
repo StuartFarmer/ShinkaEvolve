@@ -3,7 +3,6 @@ from pathlib import Path
 
 from shinka.controllers import (
     DatabaseController,
-    ProgramController,
     RunStateController,
 )
 from shinka.controllers.metadata_controller import MetadataController
@@ -26,7 +25,7 @@ def test_metadata_controller_loads_and_persists_generic_metadata():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "metadata_repo.db"
         connector = DatabaseConnector.open(db_path=str(db_path), num_islands=2, read_only=False)
-        db = ProgramController(connector)
+        db = DatabaseController(connector).programs
         try:
             controller = MetadataController(connector)
             controller.set("custom_key", "custom_value")
@@ -39,7 +38,7 @@ def test_run_state_controller_loads_and_persists_typed_run_state():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "run_state.db"
         connector = DatabaseConnector.open(db_path=str(db_path), num_islands=2, read_only=False)
-        db = ProgramController(connector)
+        db = DatabaseController(connector).programs
         try:
             db.add(_program("prog-1", generation=0, island_idx=0))
             db.add(_program("prog-2", generation=1, island_idx=1))
@@ -62,7 +61,7 @@ def test_island_controller_reports_island_state():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "island_repo.db"
         connector = DatabaseConnector.open(db_path=str(db_path), num_islands=3, read_only=False)
-        db = ProgramController(connector)
+        db = DatabaseController(connector).programs
         try:
             db.add(_program("p0", generation=0, island_idx=0))
             db.add(_program("p1", generation=1, island_idx=2))
@@ -89,7 +88,7 @@ def test_database_controller_facade_exposes_metadata_inspirations_and_embeddings
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "controller_facade.db"
         connector = DatabaseConnector.open(db_path=str(db_path), num_islands=2, read_only=False)
-        db = ProgramController(connector)
+        db = DatabaseController(connector).programs
         try:
             parent = _program("parent", generation=0, island_idx=0)
             child = Program(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from shinka.database.models import Base
 from shinka.database.connector import DatabaseConnector
+from shinka.database.models import Base
 
 from .embedding_controller import EmbeddingController
 from .island_controller import IslandController
@@ -32,28 +32,35 @@ class DatabaseController:
 
     def __init__(self, connector: DatabaseConnector) -> None:
         self.connector = connector
+        self.db_path = connector.db_path
+        self.num_islands = connector.num_islands
+        self.read_only = connector.read_only
+        self.conn = connector.conn
+        self.cursor = connector.cursor
+        self.engine = connector.engine
+        self.SessionLocal = connector.SessionLocal
         self._bootstrap()
-        self.programs = ProgramController(connector)
-        self.metadata = MetadataController(connector)
-        self.inspirations = InspirationController(connector)
-        self.embeddings = EmbeddingController(connector)
-        self.islands = IslandController(connector)
-        self.run_state = RunStateController(connector)
-        if not connector.read_only:
+        self.programs = ProgramController(self)
+        self.metadata = MetadataController(self)
+        self.inspirations = InspirationController(self)
+        self.embeddings = EmbeddingController(self)
+        self.islands = IslandController(self)
+        self.run_state = RunStateController(self)
+        if not self.read_only:
             self.run_state.load_snapshot()
 
     def _bootstrap(self) -> None:
-        self.connector.cursor.execute("PRAGMA busy_timeout = 30000;")
-        self.connector.cursor.execute("PRAGMA foreign_keys = ON;")
-        if self.connector.read_only:
+        self.cursor.execute("PRAGMA busy_timeout = 30000;")
+        self.cursor.execute("PRAGMA foreign_keys = ON;")
+        if self.read_only:
             return
-        self.connector.cursor.execute("PRAGMA journal_mode = WAL;")
-        self.connector.cursor.execute("PRAGMA wal_autocheckpoint = 1000;")
-        self.connector.cursor.execute("PRAGMA synchronous = NORMAL;")
-        self.connector.cursor.execute("PRAGMA cache_size = -64000;")
-        self.connector.cursor.execute("PRAGMA temp_store = MEMORY;")
-        Base.metadata.create_all(self.connector.engine)
-        self.connector.conn.commit()
+        self.cursor.execute("PRAGMA journal_mode = WAL;")
+        self.cursor.execute("PRAGMA wal_autocheckpoint = 1000;")
+        self.cursor.execute("PRAGMA synchronous = NORMAL;")
+        self.cursor.execute("PRAGMA cache_size = -64000;")
+        self.cursor.execute("PRAGMA temp_store = MEMORY;")
+        Base.metadata.create_all(self.engine)
+        self.conn.commit()
 
     def close(self) -> None:
         self.connector.close()

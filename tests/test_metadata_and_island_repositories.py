@@ -7,7 +7,6 @@ from shinka.controllers import (
 )
 from shinka.controllers.metadata_controller import MetadataController
 from shinka.database import Program
-from shinka.database.connector import DatabaseConnector
 
 
 def _program(program_id: str, *, generation: int = 0, island_idx: int = 0) -> Program:
@@ -24,12 +23,16 @@ def _program(program_id: str, *, generation: int = 0, island_idx: int = 0) -> Pr
 def test_metadata_controller_loads_and_persists_generic_metadata():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "metadata_repo.db"
-        connector = DatabaseConnector.open(db_path=str(db_path), num_islands=2, read_only=False)
-        db = DatabaseController(connector).programs
+        controller = DatabaseController.open(
+            db_path=str(db_path),
+            num_islands=2,
+            read_only=False,
+        )
+        db = controller.programs
         try:
-            controller = MetadataController(connector)
-            controller.set("custom_key", "custom_value")
-            assert controller.get("custom_key") == "custom_value"
+            metadata = MetadataController(controller)
+            metadata.set("custom_key", "custom_value")
+            assert metadata.get("custom_key") == "custom_value"
         finally:
             db.close()
 
@@ -37,17 +40,21 @@ def test_metadata_controller_loads_and_persists_generic_metadata():
 def test_run_state_controller_loads_and_persists_typed_run_state():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "run_state.db"
-        connector = DatabaseConnector.open(db_path=str(db_path), num_islands=2, read_only=False)
-        db = DatabaseController(connector).programs
+        controller = DatabaseController.open(
+            db_path=str(db_path),
+            num_islands=2,
+            read_only=False,
+        )
+        db = controller.programs
         try:
             db.add(_program("prog-1", generation=0, island_idx=0))
             db.add(_program("prog-2", generation=1, island_idx=1))
-            controller = RunStateController(connector)
-            controller.set("best_program_id", "prog-1")
-            controller.set("beam_search_parent_id", "prog-2")
-            controller.set("best_score_generation", "7")
-            controller.set("best_score_ever", "12.5")
-            snapshot = controller.load_snapshot()
+            run_state = RunStateController(controller)
+            run_state.set("best_program_id", "prog-1")
+            run_state.set("beam_search_parent_id", "prog-2")
+            run_state.set("best_score_generation", "7")
+            run_state.set("best_score_ever", "12.5")
+            snapshot = run_state.load_snapshot()
 
             assert snapshot.best_program_id == "prog-1"
             assert snapshot.beam_search_parent_id == "prog-2"
@@ -60,13 +67,16 @@ def test_run_state_controller_loads_and_persists_typed_run_state():
 def test_island_controller_reports_island_state():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "island_repo.db"
-        connector = DatabaseConnector.open(db_path=str(db_path), num_islands=3, read_only=False)
-        db = DatabaseController(connector).programs
+        root_controller = DatabaseController.open(
+            db_path=str(db_path),
+            num_islands=3,
+            read_only=False,
+        )
+        db = root_controller.programs
         try:
             db.add(_program("p0", generation=0, island_idx=0))
             db.add(_program("p1", generation=1, island_idx=2))
 
-            root_controller = DatabaseController(connector)
             program_controller = root_controller.programs
             island_controller = root_controller.islands
 
@@ -87,8 +97,12 @@ def test_island_controller_reports_island_state():
 def test_database_controller_facade_exposes_metadata_inspirations_and_embeddings():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "controller_facade.db"
-        connector = DatabaseConnector.open(db_path=str(db_path), num_islands=2, read_only=False)
-        db = DatabaseController(connector).programs
+        controller = DatabaseController.open(
+            db_path=str(db_path),
+            num_islands=2,
+            read_only=False,
+        )
+        db = controller.programs
         try:
             parent = _program("parent", generation=0, island_idx=0)
             child = Program(
@@ -104,8 +118,6 @@ def test_database_controller_facade_exposes_metadata_inspirations_and_embeddings
             )
             db.add(parent)
             db.add(child)
-
-            controller = DatabaseController(connector)
 
             controller.metadata.set("custom_key", "custom_value")
             assert controller.metadata.get("custom_key") == "custom_value"

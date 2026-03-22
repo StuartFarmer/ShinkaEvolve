@@ -14,10 +14,8 @@ from concurrent.futures import ThreadPoolExecutor
 from .complexity import analyze_code_metrics
 from .program import Program
 from .archive_policy import create_archive_policy
-from .islands import CombinedIslandManager
 from .program_write_service import ProgramWriteService
 from shinka.controllers import DatabaseController, EmbeddingController, ProgramController
-from .connector import DatabaseConnector
 
 logger = logging.getLogger(__name__)
 
@@ -191,12 +189,10 @@ class AsyncProgramDatabase:
             db_debugger.track_end(op_id, success=success)
 
     def _open_programs(self, *, read_only: bool) -> ProgramController:
-        return DatabaseController(
-            DatabaseConnector.open(
-                db_path=self.db_path,
-                num_islands=self.num_islands,
-                read_only=read_only,
-            )
+        return DatabaseController.open(
+            db_path=self.db_path,
+            num_islands=self.num_islands,
+            read_only=read_only,
         ).programs
 
     async def _deadlock_monitor(self):
@@ -607,20 +603,10 @@ class AsyncProgramDatabase:
         self,
         controller: DatabaseController,
     ) -> ProgramWriteService:
-        island_manager = CombinedIslandManager(
-            num_islands=self.num_islands,
-            migration_interval=self.migration_interval,
-            migration_rate=self.migration_rate,
-            island_elitism=self.island_elitism,
-            island_spawn_strategy=self.island_spawn_strategy,
-            island_spawn_subtree_size=self.island_spawn_subtree_size,
-            programs=controller.programs,
-            island_controller=controller.islands,
-            archive_policy=create_archive_policy(
-                archive_selection_strategy=self.archive_selection_strategy,
-                archive_size=self.archive_size,
-                archive_criteria=self.archive_criteria,
-            ),
+        archive_policy = create_archive_policy(
+            archive_selection_strategy=self.archive_selection_strategy,
+            archive_size=self.archive_size,
+            archive_criteria=self.archive_criteria,
         )
 
         def update_best_metadata(program: Program) -> None:
@@ -648,7 +634,12 @@ class AsyncProgramDatabase:
             best_generation = int(best_gen_raw or 0)
             if current_generation - best_generation < threshold:
                 return False
-            spawned = island_manager.spawn_new_island()
+            spawned = controller.islands.spawn_island(
+                controller.programs,
+                archive_policy,
+                strategy=self.island_spawn_strategy,
+                subtree_size=self.island_spawn_subtree_size,
+            )
             if spawned:
                 controller.programs.set_metadata(
                     "best_score_generation",
@@ -658,7 +649,11 @@ class AsyncProgramDatabase:
 
         return ProgramWriteService(
             programs=controller.programs,
-            island_manager=island_manager,
+            islands=controller.islands,
+            num_islands=self.num_islands,
+            migration_interval=self.migration_interval,
+            migration_rate=self.migration_rate,
+            island_elitism=self.island_elitism,
             update_best_program=update_best_metadata,
             update_metadata=controller.programs.set_metadata,
             recompute_embeddings=None,
@@ -671,7 +666,7 @@ class AsyncProgramDatabase:
         controller: DatabaseController,
     ) -> EmbeddingController:
         return EmbeddingController(
-            controller.connector,
+            controller,
             embedding_client_factory=self.ensure_embedding_client,
         )
 

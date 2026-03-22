@@ -23,11 +23,9 @@ import rich.box
 
 from shinka.controllers import DatabaseController, ProgramController
 from shinka.database import Program
-from shinka.database.connector import DatabaseConnector
 from shinka.database.archive_policy import create_archive_policy
 from shinka.database.async_dbase import AsyncProgramDatabase
 from shinka.database.display import DatabaseDisplay
-from shinka.database.islands import CombinedIslandManager
 from shinka.database.prompt_dbase import (
     SystemPromptDatabase,
     SystemPromptConfig,
@@ -371,7 +369,6 @@ class ShinkaEvolveRunner:
         self.metadata_repo = None
         self.island_repo = None
         self.archive_policy = None
-        self.island_manager: Optional[CombinedIslandManager] = None
         self.database_display: Optional[DatabaseDisplay] = None
         self.sync_embedding_client: Optional[EmbeddingClient] = None
         self._sync_embedding_client_init_failed = False
@@ -564,12 +561,10 @@ class ShinkaEvolveRunner:
             )
 
     def _open_programs(self, *, read_only: bool) -> ProgramController:
-        return DatabaseController(
-            DatabaseConnector.open(
-                db_path=self.db_path,
-                num_islands=self.num_islands,
-                read_only=read_only,
-            )
+        return DatabaseController.open(
+            db_path=self.db_path,
+            num_islands=self.num_islands,
+            read_only=read_only,
         ).programs
 
     def _ensure_sync_embedding_client(self) -> Optional[EmbeddingClient]:
@@ -614,8 +609,8 @@ class ShinkaEvolveRunner:
 
     def _all_islands_initialized(self) -> bool:
         return bool(
-            self.island_manager is not None
-            and self.island_manager.are_all_islands_initialized()
+            self.island_repo is not None
+            and self.island_repo.are_all_islands_initialized()
         )
 
     def _print_database_summary(self) -> None:
@@ -648,23 +643,15 @@ class ShinkaEvolveRunner:
             archive_size=self.archive_size,
             archive_criteria=self.archive_criteria,
         )
-        self.island_manager = CombinedIslandManager(
-            num_islands=self.num_islands,
-            migration_interval=self.migration_interval,
-            migration_rate=self.migration_rate,
-            island_elitism=self.island_elitism,
-            island_spawn_strategy=self.island_spawn_strategy,
-            island_spawn_subtree_size=self.island_spawn_subtree_size,
-            programs=self.programs,
-            island_controller=self.island_repo,
-            archive_policy=self.archive_policy,
-        )
         self.database_display = DatabaseDisplay(
             programs=self.programs,
             archive_size=self.archive_size,
             num_islands=self.num_islands,
-            island_manager=self.island_manager,
+            islands=self.island_repo,
             archive_policy=self.archive_policy,
+            migration_interval=self.migration_interval,
+            migration_rate=self.migration_rate,
+            island_elitism=self.island_elitism,
             default_console=self.console,
         )
         self.database_display.set_last_iteration(self.runtime_last_iteration)
@@ -2662,7 +2649,7 @@ class ShinkaEvolveRunner:
                     code_embedding,
                     generation,
                     parent_program,
-                    self.island_manager,
+                    self.island_repo,
                 )
 
                 if should_check:
@@ -2695,9 +2682,11 @@ class ShinkaEvolveRunner:
                     # If not accepted, continue to next attempt (rejection sampling)
                 else:
                     proposal_accepted = True
-                    if self.island_manager is None:
-                        self.novelty_judge.log_novelty_skip_message("no island manager")
-                    elif not self.island_manager.are_all_islands_initialized():
+                    if self.island_repo is None:
+                        self.novelty_judge.log_novelty_skip_message(
+                            "no island controller"
+                        )
+                    elif not self.island_repo.are_all_islands_initialized():
                         self.novelty_judge.log_novelty_skip_message(
                             "not all islands initialized yet"
                         )

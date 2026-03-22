@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from shinka.database.connector import DatabaseConnector
 from shinka.database.models import RunStateRecord, ProgramRecord
 from .types import RunMetadataSnapshot
+
+if TYPE_CHECKING:
+    from .database_controller import DatabaseController
 
 
 class RunStateController:
@@ -23,10 +25,10 @@ class RunStateController:
         "initial_program_count_adjustment",
     }
 
-    def __init__(self, connector: DatabaseConnector) -> None:
-        self.connector = connector
-        self._session_factory = connector.SessionLocal
-        self.read_only = connector.read_only
+    def __init__(self, database: "DatabaseController") -> None:
+        self.database = database
+        self._session_factory = database.SessionLocal
+        self.read_only = database.read_only
 
     @contextmanager
     def _managed_session(self, session: Session | None = None):

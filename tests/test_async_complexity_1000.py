@@ -17,7 +17,6 @@ from typing import Any, Dict
 
 from shinka.controllers import DatabaseController
 from shinka.database import Program
-from shinka.database.connector import DatabaseConnector
 
 
 # Allow running this file directly with `python tests/test_async_complexity_1000.py`
@@ -77,8 +76,10 @@ async def _run_single_additions_with_complexity() -> float:
                 await async_db.add_program_async(program=build_program("single", i))
             total_time = time.time() - start_time
 
-            repo = DatabaseController(
-                DatabaseConnector.open(db_path=str(db_path), num_islands=1, read_only=True)
+            repo = DatabaseController.open(
+                db_path=str(db_path),
+                num_islands=1,
+                read_only=True,
             ).programs
             sample_program = repo.get(f"single-{NUM_PROGRAMS // 2:04d}")
             repo.close()
@@ -125,8 +126,10 @@ async def _run_concurrent_additions_with_complexity() -> float:
             await asyncio.gather(*tasks)
             total_time = time.time() - start_time
 
-            repo = DatabaseController(
-                DatabaseConnector.open(db_path=str(db_path), num_islands=1, read_only=True)
+            repo = DatabaseController.open(
+                db_path=str(db_path),
+                num_islands=1,
+                read_only=True,
             ).programs
             sample_program = repo.get(f"conc-{(NUM_PROGRAMS * 3) // 4:04d}")
             repo.close()

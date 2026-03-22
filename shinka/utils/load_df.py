@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Optional, Tuple, Union
 
 from shinka.controllers import DatabaseController
-from shinka.database.connector import DatabaseConnector
 
 
 def load_programs_to_df(
@@ -45,11 +44,11 @@ def load_programs_to_df(
         print(f"Error: Database file not found at {db_path_str}")
         return None
 
-    conn = None
     repo = None
     try:
-        repo = DatabaseController(
-            DatabaseConnector.open(db_path=str(db_file), read_only=True)
+        repo = DatabaseController.open(
+            db_path=str(db_file),
+            read_only=True,
         ).programs
         programs = repo.list_all()
 

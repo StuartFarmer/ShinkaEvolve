@@ -5,7 +5,6 @@ from pathlib import Path
 
 from shinka.database import Program
 from shinka.database.archive_policy import create_archive_policy
-from shinka.database.islands import CombinedIslandManager
 from shinka.database.program_write_service import ProgramWriteService
 from shinka.controllers import DatabaseController
 
@@ -30,6 +29,7 @@ class RuntimeHarness:
         self.num_islands = num_islands
         self.enable_dynamic_islands = enable_dynamic_islands
         self.stagnation_threshold = stagnation_threshold
+        self.island_spawn_strategy = island_spawn_strategy
         self.best_score_generation = 0
         self.best_score_ever = None
         self.last_iteration = 0
@@ -40,20 +40,13 @@ class RuntimeHarness:
             archive_size=40,
             archive_criteria={"combined_score": 1.0},
         )
-        self.island_manager = CombinedIslandManager(
+        self.write_service = ProgramWriteService(
+            programs=self.programs,
+            islands=self.controller.islands,
             num_islands=num_islands,
             migration_interval=10,
             migration_rate=0.0,
             island_elitism=True,
-            island_spawn_strategy=island_spawn_strategy,
-            island_spawn_subtree_size=1,
-            programs=self.programs,
-            island_controller=self.controller.islands,
-            archive_policy=self.archive_policy,
-        )
-        self.write_service = ProgramWriteService(
-            programs=self.programs,
-            island_manager=self.island_manager,
             update_best_program=self._update_best_program,
             update_metadata=self.programs.set_metadata,
             recompute_embeddings=None,
@@ -104,7 +97,12 @@ class RuntimeHarness:
     def check_and_spawn_island_if_stagnant(self, current_generation: int) -> bool:
         if not self.is_stagnant(current_generation):
             return False
-        spawned = self.island_manager.spawn_new_island()
+        spawned = self.controller.islands.spawn_island(
+            self.programs,
+            self.archive_policy,
+            strategy=self.island_spawn_strategy,
+            subtree_size=1,
+        )
         if spawned:
             self.best_score_generation = current_generation
             self.programs.set_metadata(
@@ -164,7 +162,7 @@ def test_dynamic_island_spawning():
                 island_idx=0,
             )
         )
-        initial_islands = runtime.island_manager.get_island_populations()
+        initial_islands = runtime.controller.islands.get_island_populations()
 
         for gen in range(1, 5):
             runtime.add(
@@ -178,7 +176,7 @@ def test_dynamic_island_spawning():
                 )
             )
 
-        final_islands = runtime.island_manager.get_island_populations()
+        final_islands = runtime.controller.islands.get_island_populations()
         assert len(final_islands) > len(initial_islands)
         assert max(final_islands.keys()) >= runtime.num_islands
         runtime.close()
@@ -204,7 +202,7 @@ def test_no_spawning_when_disabled():
                 island_idx=0,
             )
         )
-        initial_islands = runtime.island_manager.get_island_populations()
+        initial_islands = runtime.controller.islands.get_island_populations()
 
         for gen in range(1, 10):
             runtime.add(
@@ -218,7 +216,7 @@ def test_no_spawning_when_disabled():
                 )
             )
 
-        final_islands = runtime.island_manager.get_island_populations()
+        final_islands = runtime.controller.islands.get_island_populations()
         assert len(final_islands) == len(initial_islands)
         runtime.close()
 
@@ -321,7 +319,7 @@ def test_spawn_strategies():
                     )
                 )
 
-            final_islands = runtime.island_manager.get_island_populations()
+            final_islands = runtime.controller.islands.get_island_populations()
             assert len(final_islands) > 2
 
             spawned_island_idx = max(final_islands.keys())

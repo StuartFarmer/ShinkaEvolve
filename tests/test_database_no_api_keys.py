@@ -4,7 +4,6 @@ from pathlib import Path
 
 from shinka.controllers import DatabaseController
 from shinka.database import Program
-from shinka.database.connector import DatabaseConnector
 from shinka.database.async_dbase import AsyncProgramDatabase
 
 
@@ -25,13 +24,17 @@ def test_program_database_init_without_openai_key(monkeypatch):
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "no_key_init.db"
-        db = DatabaseController(
-            DatabaseConnector.open(db_path=str(db_path), num_islands=1, read_only=False)
+        db = DatabaseController.open(
+            db_path=str(db_path),
+            num_islands=1,
+            read_only=False,
         ).programs
         try:
             db.add(_program("p0"))
-            repo = DatabaseController(
-                DatabaseConnector.open(db_path=str(db_path), num_islands=1, read_only=True)
+            repo = DatabaseController.open(
+                db_path=str(db_path),
+                num_islands=1,
+                read_only=True,
             ).programs
             assert repo.get("p0") is not None
             repo.close()
@@ -58,8 +61,10 @@ def test_async_db_add_without_openai_key_when_embeddings_disabled(monkeypatch):
             )
             try:
                 await async_db.add_program_async(_program("async-p0"))
-                repo = DatabaseController(
-                    DatabaseConnector.open(db_path=str(db_path), num_islands=1, read_only=True)
+                repo = DatabaseController.open(
+                    db_path=str(db_path),
+                    num_islands=1,
+                    read_only=True,
                 ).programs
                 assert repo.get("async-p0") is not None
                 repo.close()

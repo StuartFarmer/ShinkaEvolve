@@ -10,7 +10,6 @@ from .novelty_judge import NoveltyJudge
 from ..llm import AsyncLLMClient
 from ..database import Program
 from shinka.controllers import DatabaseController, ProgramController
-from ..database.connector import DatabaseConnector
 from ..database.similarity_service import SimilarityService
 
 logger = logging.getLogger(__name__)
@@ -56,7 +55,7 @@ class AsyncNoveltyJudge:
         code_embedding: List[float],
         current_gen: int,
         parent_program: Program,
-        island_manager=None,
+        islands=None,
     ) -> bool:
         """Async version of should_check_novelty.
 
@@ -72,9 +71,9 @@ class AsyncNoveltyJudge:
             # This needs to be done in main thread due to SQLite threading restrictions
             if (
                 parent_program.island_idx is not None
-                and island_manager is not None
-                and hasattr(island_manager, "are_all_islands_initialized")
-                and island_manager.are_all_islands_initialized()
+                and islands is not None
+                and hasattr(islands, "are_all_islands_initialized")
+                and islands.are_all_islands_initialized()
             ):
                 return True
 
@@ -213,12 +212,10 @@ class AsyncNoveltyJudge:
     ) -> List[float]:
         if self.db_path is None:
             return []
-        programs = DatabaseController(
-            DatabaseConnector.open(
-                db_path=self.db_path,
-                num_islands=self.num_islands,
-                read_only=True,
-            )
+        programs = DatabaseController.open(
+            db_path=self.db_path,
+            num_islands=self.num_islands,
+            read_only=True,
         ).programs
         try:
             return SimilarityService(programs).compute_similarity(
@@ -233,12 +230,10 @@ class AsyncNoveltyJudge:
     ) -> Optional[Program]:
         if self.db_path is None:
             return None
-        programs = DatabaseController(
-            DatabaseConnector.open(
-                db_path=self.db_path,
-                num_islands=self.num_islands,
-                read_only=True,
-            )
+        programs = DatabaseController.open(
+            db_path=self.db_path,
+            num_islands=self.num_islands,
+            read_only=True,
         ).programs
         try:
             return SimilarityService(programs).get_most_similar_program(

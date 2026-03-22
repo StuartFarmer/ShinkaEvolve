@@ -5,7 +5,6 @@ from pathlib import Path
 from shinka.database import Program
 from shinka.database.island_sampler import create_island_sampler
 from shinka.database.archive_policy import create_archive_policy
-from shinka.database.islands import CombinedIslandManager
 from shinka.controllers import DatabaseController
 
 
@@ -32,17 +31,6 @@ def test_island_samplers():
                 archive_size=40,
                 archive_criteria={"combined_score": 1.0},
             )
-            island_manager = CombinedIslandManager(
-                num_islands=3,
-                migration_interval=10,
-                migration_rate=0.0,
-                island_elitism=True,
-                island_spawn_strategy="initial",
-                island_spawn_subtree_size=1,
-                programs=repo,
-                island_controller=controller.islands,
-                archive_policy=archive_policy,
-            )
             island_sampler = create_island_sampler(
                 programs=repo,
                 strategy=strategy,
@@ -61,7 +49,7 @@ def test_island_samplers():
                     repo.add(program)
 
             # Test sampling
-            initialized_islands = island_manager.get_initialized_islands()
+            initialized_islands = controller.islands.list_initialized_island_ids()
             print(f"Initialized islands: {initialized_islands}")
 
             # Sample multiple times to see distribution

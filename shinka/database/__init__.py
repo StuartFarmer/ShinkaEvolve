@@ -1,7 +1,6 @@
 __all__ = [
     "Program",
     "DatabaseConfig",
-    "DatabaseConnector",
     "AsyncProgramDatabase",
     "InspirationUse",
     "ProgramCountSnapshot",
@@ -29,10 +28,6 @@ def __getattr__(name):
         from .config import DatabaseConfig
 
         return DatabaseConfig
-    if name == "DatabaseConnector":
-        from .connector import DatabaseConnector
-
-        return DatabaseConnector
     if name == "AsyncProgramDatabase":
         from .async_dbase import AsyncProgramDatabase
 

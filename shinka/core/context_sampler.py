@@ -27,7 +27,6 @@ import numpy as np
 from shinka.core.search_policies import InspirationSelector, ParentSelector
 from shinka.controllers import DatabaseController, ProgramController
 from shinka.controllers.types import Island
-from shinka.database.connector import DatabaseConnector
 from shinka.database.program import Program
 from shinka.database.archive_policy import ArchivePolicy, create_archive_policy
 
@@ -359,12 +358,10 @@ class AsyncContextSampler:
         with_fix_mode: bool = True,
     ) -> SampledContext:
         async with self._lock:
-            programs = DatabaseController(
-                DatabaseConnector.open(
-                    db_path=self.db_path,
-                    num_islands=self.num_islands,
-                    read_only=True,
-                )
+            programs = DatabaseController.open(
+                db_path=self.db_path,
+                num_islands=self.num_islands,
+                read_only=True,
             ).programs
             try:
                 sampler = ContextSampler(

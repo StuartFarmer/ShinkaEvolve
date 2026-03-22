@@ -25,7 +25,6 @@ import webbrowser
 from typing import Optional, Dict, Any, Tuple
 
 from shinka.controllers import DatabaseController
-from shinka.database.connector import DatabaseConnector
 from shinka.database import SystemPromptConfig, SystemPromptDatabase
 
 # We'll use a simple text-to-PDF approach instead of complex dependencies
@@ -230,8 +229,9 @@ class DatabaseRequestHandler(http.server.SimpleHTTPRequestHandler):
         for i in range(max_retries):
             db = None
             try:
-                db = DatabaseController(
-                    DatabaseConnector.open(db_path=abs_db_path, read_only=True)
+                db = DatabaseController.open(
+                    db_path=abs_db_path,
+                    read_only=True,
                 ).programs
 
                 programs = db.list_all()
@@ -313,8 +313,9 @@ class DatabaseRequestHandler(http.server.SimpleHTTPRequestHandler):
         for i in range(max_retries):
             db = None
             try:
-                db = DatabaseController(
-                    DatabaseConnector.open(db_path=abs_db_path, read_only=True)
+                db = DatabaseController.open(
+                    db_path=abs_db_path,
+                    read_only=True,
                 ).programs
 
                 summaries = db.get_summaries()
@@ -374,8 +375,9 @@ class DatabaseRequestHandler(http.server.SimpleHTTPRequestHandler):
         for i in range(max_retries):
             db = None
             try:
-                db = DatabaseController(
-                    DatabaseConnector.open(db_path=abs_db_path, read_only=True)
+                db = DatabaseController.open(
+                    db_path=abs_db_path,
+                    read_only=True,
                 ).programs
 
                 snapshot = db.get_count_snapshot()
@@ -435,8 +437,9 @@ class DatabaseRequestHandler(http.server.SimpleHTTPRequestHandler):
         for i in range(max_retries):
             db = None
             try:
-                db = DatabaseController(
-                    DatabaseConnector.open(db_path=abs_db_path, read_only=True)
+                db = DatabaseController.open(
+                    db_path=abs_db_path,
+                    read_only=True,
                 ).programs
 
                 program = db.get(program_id)

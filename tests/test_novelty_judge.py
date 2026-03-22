@@ -32,7 +32,7 @@ class DummyNoveltyLLM:
         return response
 
 
-class DummyIslandManager:
+class DummyIslands:
     def __init__(self, initialized=True):
         self.initialized = initialized
 
@@ -49,7 +49,7 @@ class DummyDatabase:
     ):
         self._similarity_sequences = list(similarity_sequences)
         self.most_similar_program = most_similar_program
-        self.island_manager = DummyIslandManager(initialized=island_initialized)
+        self.islands = DummyIslands(initialized=island_initialized)
 
     def compute_similarity(self, code_embedding, island_idx):
         if not self._similarity_sequences:

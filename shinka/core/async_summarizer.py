@@ -336,14 +336,11 @@ class AsyncMetaSummarizer:
                 try:
                     def update_metadata():
                         from shinka.controllers import DatabaseController
-                        from shinka.database.connector import DatabaseConnector
 
-                        thread_repo = DatabaseController(
-                            DatabaseConnector.open(
-                                db_path=db_path,
-                                num_islands=num_islands,
-                                read_only=False,
-                            )
+                        thread_repo = DatabaseController.open(
+                            db_path=db_path,
+                            num_islands=num_islands,
+                            read_only=False,
                         ).programs
                         try:
                             if best_program.metadata is None:

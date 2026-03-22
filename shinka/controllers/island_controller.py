@@ -1,23 +1,30 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import Dict, List, Optional
+import logging
+import random
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
-from shinka.database.connector import DatabaseConnector
 from shinka.database.models import ProgramEvaluationRecord, ProgramRecord
+from shinka.database.program import Program
 from .types import Island
+
+if TYPE_CHECKING:
+    from .database_controller import DatabaseController
+
+logger = logging.getLogger(__name__)
 
 
 class IslandController:
     """Island-scoped computed view/controller over persisted programs."""
 
-    def __init__(self, connector: DatabaseConnector) -> None:
-        self.connector = connector
-        self._session_factory = connector.SessionLocal
-        self.num_islands = connector.num_islands
+    def __init__(self, database: "DatabaseController") -> None:
+        self.database = database
+        self._session_factory = database.SessionLocal
+        self.num_islands = database.num_islands
 
     @contextmanager
     def _managed_session(self, session: Session | None = None):
@@ -138,3 +145,189 @@ class IslandController:
         if self.num_islands <= 0:
             return {}
         return {island.island_idx: island.total_programs for island in self.list_islands()}
+
+    def format_populations(self) -> str:
+        populations = self.get_island_populations()
+        if not populations:
+            return f"0 programs in {self.num_islands} islands"
+        parts = []
+        for island_idx, count in sorted(populations.items()):
+            island_color = f"color({30 + island_idx % 220})"
+            parts.append(f"[{island_color}]I{island_idx}: {count}[/{island_color}]")
+        return " | ".join(parts)
+
+    def assign_program(self, program: Any, *, num_islands: int) -> None:
+        if program.island_idx is not None:
+            return
+        if num_islands <= 0:
+            program.island_idx = 0
+            return
+        if self.get_program_count() == 0:
+            program.island_idx = 0
+            if program.metadata is None:
+                program.metadata = {}
+            program.metadata["_needs_island_copies"] = True
+            return
+        if program.parent_id:
+            parent_island = self.get_program_island(program.parent_id)
+            if parent_island is not None:
+                program.island_idx = parent_island
+                return
+        initialized = set(self.list_initialized_island_ids())
+        uninitialized = [idx for idx in range(num_islands) if idx not in initialized]
+        if uninitialized:
+            program.island_idx = min(uninitialized)
+            return
+        program.island_idx = random.randint(0, num_islands - 1)
+
+    def copy_program_to_islands(
+        self,
+        programs,
+        program: Program,
+        *,
+        num_islands: int,
+    ) -> List[str]:
+        if num_islands <= 1:
+            return []
+        created_ids: List[str] = []
+        for island_idx in range(1, num_islands):
+            created_ids.append(
+                programs.insert_program_copy_from_object(
+                    program=program,
+                    island_idx=island_idx,
+                    metadata_updates={
+                        "_is_island_copy": True,
+                        "_original_program_id": program.id,
+                    },
+                    clear_copy_flag=True,
+                )
+            )
+        programs.commit()
+        return created_ids
+
+    def perform_migration(
+        self,
+        programs,
+        *,
+        num_islands: int,
+        migration_rate: float,
+        island_elitism: bool,
+        current_generation: int,
+    ) -> bool:
+        if num_islands < 2 or migration_rate <= 0:
+            return False
+
+        migrated = 0
+        migrated_ids: set[str] = set()
+        for source_idx in range(num_islands):
+            island_size = programs.count_by_island(source_idx)
+            if island_size <= 1:
+                continue
+            num_migrants = max(1, int(island_size * migration_rate))
+            dest_islands = [idx for idx in range(num_islands) if idx != source_idx]
+            if not dest_islands:
+                continue
+            migrants = programs.list_migrant_ids(
+                source_idx=source_idx,
+                num_migrants=num_migrants,
+                island_elitism=island_elitism,
+            )
+            for migrant_id in migrants:
+                if migrant_id in migrated_ids:
+                    continue
+                migrated_ids.add(migrant_id)
+                programs.migrate_program(
+                    migrant_id=migrant_id,
+                    source_idx=source_idx,
+                    dest_idx=random.choice(dest_islands),
+                    current_generation=current_generation,
+                )
+                migrated += 1
+        programs.commit()
+        return migrated > 0
+
+    def spawn_island(
+        self,
+        programs,
+        archive_policy,
+        *,
+        strategy: str,
+        subtree_size: int,
+    ) -> bool:
+        source = self._select_spawn_source_row(
+            programs,
+            archive_policy,
+            strategy=strategy,
+        )
+        if source is None:
+            return False
+        new_island_idx = self.get_next_island_index()
+        subtree = self._list_spawn_subtree_rows(
+            programs,
+            source,
+            max_size=subtree_size,
+        )
+        old_to_new_id: Dict[str, str] = {}
+        for idx, record in enumerate(subtree):
+            is_root = idx == 0
+            old_parent_id = record.get("parent_id")
+            if is_root:
+                new_parent_id = None
+            elif old_parent_id and old_parent_id in old_to_new_id:
+                new_parent_id = old_to_new_id[old_parent_id]
+            else:
+                new_parent_id = None
+            old_to_new_id[record["id"]] = programs.insert_program_copy_from_row(
+                source_program=record,
+                new_island_idx=new_island_idx,
+                new_parent_id=new_parent_id,
+                strategy=strategy,
+                is_root=is_root,
+            )
+        programs.commit()
+        logger.info(
+            "Spawned island %s from strategy %s using %s programs",
+            new_island_idx,
+            strategy,
+            len(subtree),
+        )
+        return True
+
+    def _select_spawn_source_row(
+        self,
+        programs,
+        archive_policy,
+        *,
+        strategy: str,
+    ) -> Optional[Dict]:
+        if strategy == "initial":
+            return programs.get_initial_program_row()
+        if strategy == "best":
+            return programs.get_best_program_row()
+        if strategy == "archive_random":
+            program = archive_policy.pick_random(programs.list_correct())
+            return None if program is None else program.to_dict()
+        return programs.get_initial_program_row()
+
+    def _list_spawn_subtree_rows(
+        self,
+        programs,
+        root_program: Dict,
+        *,
+        max_size: int,
+    ) -> List[Dict]:
+        if max_size <= 1:
+            return [root_program]
+        collected = [root_program]
+        queue = [root_program]
+        remaining = max_size - 1
+        while queue and remaining > 0:
+            current = queue.pop(0)
+            children = programs.get_correct_child_rows(current["id"], limit=remaining)
+            for child in children:
+                if remaining <= 0:
+                    break
+                collected.append(child)
+                queue.append(child)
+                remaining -= 1
+        return collected

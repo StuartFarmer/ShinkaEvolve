@@ -94,12 +94,17 @@ class NoveltyJudge:
         # Novelty is island-scoped in the current design. Until islands are
         # initialized, Shinka intentionally avoids filtering proposals by
         # similarity so the archive can bootstrap.
+        islands = None
+        if hasattr(database, "are_all_islands_initialized"):
+            islands = database
+        elif hasattr(database, "islands"):
+            islands = database.islands
+
         if (
             parent_program.island_idx is not None
-            and hasattr(database, "island_manager")
-            and database.island_manager is not None
-            and hasattr(database.island_manager, "are_all_islands_initialized")
-            and database.island_manager.are_all_islands_initialized()
+            and islands is not None
+            and hasattr(islands, "are_all_islands_initialized")
+            and islands.are_all_islands_initialized()
         ):
             return True
 

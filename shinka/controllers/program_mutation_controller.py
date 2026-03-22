@@ -4,13 +4,12 @@ import logging
 import math
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import numpy as np
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from shinka.database.connector import DatabaseConnector
 from shinka.database.program import Program
 from shinka.database.models import (
     ProgramEmbeddingProjectionRecord,
@@ -25,6 +24,9 @@ from .inspiration_controller import InspirationController
 from .program_query_controller import ProgramQueryController
 from .run_state_controller import RunStateController
 from .types import InspirationUse
+
+if TYPE_CHECKING:
+    from .database_controller import DatabaseController
 
 logger = logging.getLogger(__name__)
 
@@ -58,13 +60,13 @@ def _normalize_text_feedback(text_feedback: Any) -> str:
 class ProgramMutationController:
     """Write/mutation layer for programs and program-related persistence helpers."""
 
-    def __init__(self, connector: DatabaseConnector) -> None:
-        self.connector = connector
-        self._session_factory = connector.SessionLocal
-        self.read_only = connector.read_only
-        self.run_state = RunStateController(connector)
-        self.inspirations = InspirationController(connector)
-        self.query = ProgramQueryController(connector)
+    def __init__(self, database: "DatabaseController") -> None:
+        self.database = database
+        self._session_factory = database.SessionLocal
+        self.read_only = database.read_only
+        self.run_state = RunStateController(database)
+        self.inspirations = InspirationController(database)
+        self.query = ProgramQueryController(database)
 
     def _session(self) -> Session:
         return self._session_factory()
@@ -620,5 +622,5 @@ class ProgramMutationController:
             session.commit()
 
     def commit(self) -> None:
-        if self.connector.conn and not self.read_only:
-            self.connector.conn.commit()
+        if self.database.conn and not self.read_only:
+            self.database.conn.commit()

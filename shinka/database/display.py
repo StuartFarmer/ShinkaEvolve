@@ -21,15 +21,21 @@ class DatabaseDisplay:
         programs,
         archive_size: int,
         num_islands: int,
-        island_manager,
+        islands,
         archive_policy,
+        migration_interval: int = 0,
+        migration_rate: float = 0.0,
+        island_elitism: bool = False,
         default_console: Optional[RichConsole] = None,
     ):
         self.programs = programs
         self.archive_size = archive_size
         self.num_islands = num_islands
-        self.island_manager = island_manager
+        self.islands = islands
         self.archive_policy = archive_policy
+        self.migration_interval = migration_interval
+        self.migration_rate = migration_rate
+        self.island_elitism = island_elitism
         self.default_console = default_console
         self.last_iteration = 0
 
@@ -227,8 +233,15 @@ class DatabaseDisplay:
             f"[bold]{len(archive_programs)}[/bold] / {self.archive_size} ({archive_percentage:.0f}%)",
         )
         if self.num_islands > 0:
-            summary_table.add_row("Island Populations", self.island_manager.format_island_display())
-            migration_info = self.island_manager.get_migration_info()
+            summary_table.add_row("Island Populations", self.islands.format_populations())
+            migration_info = None
+            if self.migration_interval > 0:
+                migration_info = (
+                    f"{self.migration_interval}G, "
+                    f"{self.migration_rate * 100:.0f}%"
+                )
+                if self.island_elitism:
+                    migration_info += "(E)"
             if migration_info:
                 summary_table.add_row("Migration Policy", migration_info)
 

@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Callable, Optional
 
 if TYPE_CHECKING:
     from .program import Program
-    from .islands import CombinedIslandManager
+    from shinka.controllers.island_controller import IslandController
     from shinka.controllers.program_controller import ProgramController
 
 
@@ -35,7 +35,11 @@ class ProgramWriteService:
         self,
         *,
         programs: "ProgramController",
-        island_manager: "CombinedIslandManager",
+        islands: "IslandController",
+        num_islands: int,
+        migration_interval: int,
+        migration_rate: float,
+        island_elitism: bool,
         update_best_program: Callable[["Program"], None],
         update_metadata: Callable[[str, Optional[str]], None],
         recompute_embeddings: Optional[Callable[[], None]] = None,
@@ -43,7 +47,11 @@ class ProgramWriteService:
         maybe_spawn_island: Optional[Callable[[int], bool]] = None,
     ) -> None:
         self.programs = programs
-        self.island_manager = island_manager
+        self.islands = islands
+        self.num_islands = num_islands
+        self.migration_interval = migration_interval
+        self.migration_rate = migration_rate
+        self.island_elitism = island_elitism
         self.update_best_program = update_best_program
         self.update_metadata = update_metadata
         self.recompute_embeddings = recompute_embeddings
@@ -57,7 +65,7 @@ class ProgramWriteService:
         verbose: bool = False,
         current_last_iteration: int = 0,
     ) -> ProgramWriteResult:
-        self.island_manager.assign_island(program)
+        self.islands.assign_program(program, num_islands=self.num_islands)
         program_id = self.programs.add(program, verbose=False)
 
         self.update_best_program(program)
@@ -74,7 +82,11 @@ class ProgramWriteService:
             self.print_program_summary(program)
 
         if bool(program.metadata and program.metadata.get("_needs_island_copies")):
-            self.island_manager.copy_program_to_islands(program)
+            self.islands.copy_program_to_islands(
+                self.programs,
+                program,
+                num_islands=self.num_islands,
+            )
             if program.metadata:
                 program.metadata.pop("_needs_island_copies", None)
                 self.programs.update_program_metadata(program.id, program.metadata)
@@ -85,8 +97,18 @@ class ProgramWriteService:
             spawned_island = bool(self.maybe_spawn_island(program.generation))
 
         ran_migration = False
-        if self.island_manager.should_schedule_migration(program):
-            self.island_manager.perform_migration(last_iteration)
+        if (
+            program.generation > 0
+            and self.migration_interval > 0
+            and (program.generation % self.migration_interval == 0)
+        ):
+            self.islands.perform_migration(
+                self.programs,
+                num_islands=self.num_islands,
+                migration_rate=self.migration_rate,
+                island_elitism=self.island_elitism,
+                current_generation=last_iteration,
+            )
             ran_migration = True
 
         return ProgramWriteResult(

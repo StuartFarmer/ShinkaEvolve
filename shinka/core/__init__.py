@@ -25,7 +25,7 @@ def __getattr__(name: str):
     if name == "EvolutionConfig":
         return getattr(import_module("shinka.core.config"), name)
     if name == "ShinkaEvolveRunner":
-        return getattr(import_module("shinka.core.async_runner"), name)
+        return getattr(import_module("shinka.runtime.runner"), name)
     if name == "PromptSampler":
         return getattr(import_module("shinka.core.sampler"), name)
     if name == "MetaSummarizer":
@@ -35,9 +35,9 @@ def __getattr__(name: str):
     if name == "AsyncNoveltyJudge":
         return getattr(import_module("shinka.core.async_novelty_judge"), name)
     if name in {"ContextSampler", "AsyncContextSampler", "SampledContext"}:
-        return getattr(import_module("shinka.core.context_sampler"), name)
+        return getattr(import_module("shinka.runtime.context"), name)
     if name == "run_shinka_eval":
-        return getattr(import_module("shinka.core.wrap_eval"), name)
+        return getattr(import_module("shinka.runtime.evaluation"), name)
     if name in {
         "SystemPromptEvolver",
         "SystemPromptSampler",

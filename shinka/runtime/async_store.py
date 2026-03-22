@@ -11,11 +11,12 @@ import traceback
 from typing import Callable, List, Optional, Tuple, Dict, Any
 from concurrent.futures import ThreadPoolExecutor
 
-from .connection import Database
-from . import embedding_ops, island_ops, program_reads, run_state_ops
-from .program import Program
-from .archive_policy import create_archive_policy
-from .program_write_service import ProgramWriteService
+from shinka.database import embedding_ops, island_ops, run_state_ops
+from shinka.database.connection import Database
+from shinka.programs.archive import create_archive_policy
+from shinka.programs.model import Program
+from shinka.programs import reads as program_reads
+from shinka.programs.service import ProgramWriteService
 
 logger = logging.getLogger(__name__)
 
@@ -244,7 +245,7 @@ class AsyncProgramDatabase:
                     thread_op_id = self._debug_track_start("sample_thread_safe")
                     db = None
                     try:
-                        from shinka.core.context_sampler import ContextSampler
+                        from shinka.runtime.context import ContextSampler
 
                         db = self._open_database(read_only=True)
                         sampler = ContextSampler(
@@ -325,7 +326,7 @@ class AsyncProgramDatabase:
                     )
                     db = None
                     try:
-                        from shinka.core.context_sampler import ContextSampler
+                        from shinka.runtime.context import ContextSampler
 
                         db = self._open_database(read_only=True)
                         sampler = ContextSampler(

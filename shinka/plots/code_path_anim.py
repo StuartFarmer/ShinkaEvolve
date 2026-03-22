@@ -11,7 +11,8 @@ import difflib
 
 from moviepy import VideoClip
 import numpy as np
-from shinka.utils import load_programs_to_df, get_path_to_best_node, store_best_path
+from shinka.reporting import load_programs_to_df
+from shinka.utils import get_path_to_best_node, store_best_path
 import argparse
 
 parser = argparse.ArgumentParser()

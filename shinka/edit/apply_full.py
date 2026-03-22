@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import Optional, Union
 from .apply_diff import write_git_diff, _mutable_ranges, EVOLVE_START, EVOLVE_END
 from shinka.llm import extract_between
-from shinka.utils.languages import get_code_fence_languages, get_language_extension
+from shinka.common.languages import get_code_fence_languages, get_language_extension
 import logging
 
 logger = logging.getLogger(__name__)

@@ -1,5 +1,5 @@
 from shinka.edit import apply_diff_patch, apply_full_patch
-from shinka.utils.languages import (
+from shinka.common.languages import (
     get_code_fence_languages,
     get_evolve_comment_prefix,
     get_language_extension,

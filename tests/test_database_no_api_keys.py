@@ -3,7 +3,7 @@ import tempfile
 from pathlib import Path
 
 from shinka.database import Database, Program, program_reads, program_writes
-from shinka.database.async_dbase import AsyncProgramDatabase
+from shinka.runtime.async_store import AsyncProgramDatabase
 
 
 def _program(program_id: str) -> Program:

@@ -5,10 +5,10 @@ from typing import Any, Dict, List, Optional, Sequence
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from . import program_hydration
-from .models import ProgramEvaluationRecord, ProgramRecord
-from .program import Program
-from .types import Island, ProgramCountSnapshot
+from . import hydration as program_hydration
+from .model import Program
+from shinka.database.models import ProgramEvaluationRecord, ProgramRecord
+from shinka.database.types import Island, ProgramCountSnapshot
 
 
 def _program_query(

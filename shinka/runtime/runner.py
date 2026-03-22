@@ -21,9 +21,7 @@ from rich.console import Console
 from rich.table import Table
 import rich.box
 
-from shinka.database import Database, Program, island_ops, program_reads, program_writes, run_state_ops
-from shinka.database.archive_policy import create_archive_policy
-from shinka.database.async_dbase import AsyncProgramDatabase
+from shinka.database import Database, island_ops, run_state_ops
 from shinka.database.display import DatabaseDisplay
 from shinka.database.prompt_dbase import (
     SystemPromptDatabase,
@@ -47,7 +45,6 @@ from shinka.edit.async_apply import (
 )
 from shinka.edit import summarize_diff
 from shinka.core.sampler import PromptSampler
-from shinka.core.context_sampler import AsyncContextSampler
 from shinka.core.summarizer import MetaSummarizer
 from shinka.core.async_summarizer import AsyncMetaSummarizer
 from shinka.core.async_novelty_judge import AsyncNoveltyJudge
@@ -58,8 +55,13 @@ from shinka.core.prompt_evolver import (
     AsyncSystemPromptEvolver,
 )
 from shinka.logo import print_gradient_logo, shinka_ascii
-from shinka.utils import get_language_extension
-from shinka.utils.languages import get_evolve_comment_prefix
+from shinka.common.languages import get_evolve_comment_prefix, get_language_extension
+from shinka.programs.archive import create_archive_policy
+from shinka.programs.model import Program
+from shinka.programs import reads as program_reads
+from shinka.programs import writes as program_writes
+from shinka.runtime.async_store import AsyncProgramDatabase
+from shinka.runtime.context import AsyncContextSampler
 
 logger = logging.getLogger(__name__)
 

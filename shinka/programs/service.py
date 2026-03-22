@@ -5,11 +5,13 @@ from typing import TYPE_CHECKING, Callable, Optional
 
 from sqlalchemy.orm import Session
 
-from . import island_ops, program_writes
-from .connection import Database
+from . import writes as program_writes
+from .model import Program
+from shinka.database import island_ops
+from shinka.database.connection import Database
 
 if TYPE_CHECKING:
-    from .program import Program
+    from .model import Program
 
 
 @dataclass(frozen=True)

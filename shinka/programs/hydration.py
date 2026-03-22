@@ -5,15 +5,15 @@ from typing import Any, Dict, Optional, Sequence
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from . import inspiration_ops
-from .models import (
+from shinka.database import inspiration_ops
+from shinka.database.models import (
     ProgramEmbeddingProjectionRecord,
     ProgramEmbeddingRecord,
     ProgramEvaluationRecord,
     ProgramProposalRecord,
     ProgramRecord,
 )
-from .program import Program
+from .model import Program
 
 
 def build_inspiration_index(

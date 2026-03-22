@@ -13,7 +13,7 @@ from typing import Callable, Dict, List, Optional, TypeAlias
 
 import numpy as np
 
-from .program import Program
+from .model import Program
 
 logger = logging.getLogger(__name__)
 

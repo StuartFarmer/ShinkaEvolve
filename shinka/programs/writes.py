@@ -10,17 +10,18 @@ import numpy as np
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from . import inspiration_ops, program_reads, run_state_ops
-from .complexity import analyze_code_metrics
-from .models import (
+from . import reads as program_reads
+from .model import Program
+from shinka.database import inspiration_ops, run_state_ops
+from shinka.database.complexity import analyze_code_metrics
+from shinka.database.models import (
     ProgramEmbeddingProjectionRecord,
     ProgramEmbeddingRecord,
     ProgramEvaluationRecord,
     ProgramProposalRecord,
     ProgramRecord,
 )
-from .program import Program
-from .types import InspirationUse
+from shinka.database.types import InspirationUse
 
 logger = logging.getLogger(__name__)
 

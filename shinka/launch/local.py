@@ -4,7 +4,7 @@ import threading
 import os
 from pathlib import Path
 from typing import Optional, Tuple, TextIO
-from shinka.utils import load_results, parse_time_to_seconds
+from shinka.launch.support import load_results, parse_time_to_seconds
 import logging
 
 logger = logging.getLogger(__name__)

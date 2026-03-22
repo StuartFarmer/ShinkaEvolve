@@ -3,6 +3,8 @@ __all__ = [
     "Database",
     "DatabaseConfig",
     "AsyncProgramDatabase",
+    "program_reads",
+    "program_writes",
     "InspirationUse",
     "ProgramCountSnapshot",
     "RunMetadataSnapshot",
@@ -22,7 +24,7 @@ __all__ = [
 
 def __getattr__(name):
     if name == "Program":
-        from .program import Program
+        from shinka.programs.model import Program
 
         return Program
     if name == "Database":
@@ -34,9 +36,17 @@ def __getattr__(name):
 
         return DatabaseConfig
     if name == "AsyncProgramDatabase":
-        from .async_dbase import AsyncProgramDatabase
+        from shinka.runtime.async_store import AsyncProgramDatabase
 
         return AsyncProgramDatabase
+    if name == "program_reads":
+        from shinka.programs import reads as program_reads
+
+        return program_reads
+    if name == "program_writes":
+        from shinka.programs import writes as program_writes
+
+        return program_writes
     if name == "ProgramCountSnapshot":
         from .types import ProgramCountSnapshot
 
@@ -59,7 +69,7 @@ def __getattr__(name):
         "CrowdingArchivePolicy",
         "create_archive_policy",
     }:
-        from .archive_policy import (
+        from shinka.programs.archive import (
             ArchivePolicy,
             FitnessArchivePolicy,
             CrowdingArchivePolicy,
@@ -73,7 +83,7 @@ def __getattr__(name):
             "create_archive_policy": create_archive_policy,
         }[name]
     if name in {"SimilarityService", "cosine_similarity"}:
-        from .similarity_service import SimilarityService, cosine_similarity
+        from shinka.programs.similarity import SimilarityService, cosine_similarity
 
         return {
             "SimilarityService": SimilarityService,

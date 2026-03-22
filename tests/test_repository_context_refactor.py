@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 import uuid
 
-from shinka.core.context_sampler import ContextSampler, SampledContext
+from shinka.runtime.context import ContextSampler, SampledContext
 from shinka.database import (
     Database,
     InspirationUse,
@@ -14,7 +14,7 @@ from shinka.database import (
     program_writes,
     run_state_ops,
 )
-from shinka.database.archive_policy import FitnessArchivePolicy
+from shinka.programs.archive import FitnessArchivePolicy
 
 
 def make_program(

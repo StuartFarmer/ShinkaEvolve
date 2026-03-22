@@ -50,8 +50,8 @@ def build_program(prefix: str, idx: int) -> Program:
 
 
 async def _run_single_additions_with_complexity() -> float:
-    from shinka.database.async_dbase import AsyncProgramDatabase
-    from shinka.database import program_writes as program_writes_module
+    from shinka.runtime.async_store import AsyncProgramDatabase
+    from shinka.programs import writes as program_writes_module
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "async_single.db"
@@ -96,8 +96,8 @@ async def _run_single_additions_with_complexity() -> float:
 
 
 async def _run_concurrent_additions_with_complexity() -> float:
-    from shinka.database.async_dbase import AsyncProgramDatabase
-    from shinka.database import program_writes as program_writes_module
+    from shinka.runtime.async_store import AsyncProgramDatabase
+    from shinka.programs import writes as program_writes_module
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "async_concurrent.db"

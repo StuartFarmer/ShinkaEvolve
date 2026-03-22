@@ -12,6 +12,7 @@ import sys
 from omegaconf import DictConfig, OmegaConf
 
 from shinka.configs import config_root
+import yaml
 
 
 def _to_plain_dict(obj) -> dict:
@@ -39,6 +40,21 @@ def load_hydra_config(
     if not parent or parent == output_dir:
         return None
     return load_hydra_config(parent, max_parent_depth - 1)
+
+
+def load_configs_from_yaml(config_path: str):
+    """Load persisted yaml config into runtime config objects."""
+    from shinka.core import EvolutionConfig
+
+    with open(config_path, "r") as f:
+        configs = yaml.safe_load(f)
+
+    assert "db_config" in configs, "db_config not found in config file"
+    assert "evo_config" in configs, "evo_config not found in config file"
+
+    evo_cfg = EvolutionConfig(**configs["evo_config"])
+    db_values = dict(configs["db_config"])
+    return evo_cfg, db_values
 
 
 def build_cfgs_from_python(*launcher_args, **launcher_kwargs):

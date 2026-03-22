@@ -6,7 +6,7 @@ import tempfile
 import time
 import uuid
 import threading
-from shinka.utils import load_results
+from shinka.launch.support import load_results
 from typing import Optional
 import logging
 

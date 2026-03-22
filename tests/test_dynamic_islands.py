@@ -4,8 +4,8 @@ import tempfile
 from pathlib import Path
 
 from shinka.database import Database, Program, island_ops, program_reads, run_state_ops
-from shinka.database.archive_policy import create_archive_policy
-from shinka.database.program_write_service import ProgramWriteService
+from shinka.programs.archive import create_archive_policy
+from shinka.programs.service import ProgramWriteService
 
 
 class RuntimeHarness:

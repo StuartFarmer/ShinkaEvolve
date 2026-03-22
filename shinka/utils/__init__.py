@@ -28,9 +28,11 @@ def __getattr__(name: str):
         "store_best_path",
         "load_prompts_to_df",
     }:
-        return getattr(import_module("shinka.utils.load_df"), name)
+        return getattr(import_module("shinka.reporting.dataframe"), name)
     if name in {"parse_time_to_seconds", "load_results", "load_configs_from_yaml"}:
-        return getattr(import_module("shinka.utils.general"), name)
+        if name == "load_configs_from_yaml":
+            return getattr(import_module("shinka.configuration.hydra"), name)
+        return getattr(import_module("shinka.launch.support"), name)
     if name in {
         "build_cfgs_from_python",
         "add_evolve_markers",
@@ -38,7 +40,7 @@ def __getattr__(name: str):
         "wrap_object",
         "load_hydra_config",
     }:
-        return getattr(import_module("shinka.utils.utils_hydra"), name)
+        return getattr(import_module("shinka.configuration.hydra"), name)
     if name == "get_language_extension":
-        return getattr(import_module("shinka.utils.languages"), name)
+        return getattr(import_module("shinka.common.languages"), name)
     raise AttributeError(f"module 'shinka.utils' has no attribute {name!r}")

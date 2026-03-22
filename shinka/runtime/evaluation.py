@@ -15,7 +15,7 @@ from concurrent.futures import (
 )
 from typing import Callable, Any, Dict, List, Tuple, Optional, Union
 
-from shinka.utils.eval_stop import (
+from shinka.runtime.stopping import (
     EarlyStopMethod,
     EarlyStopDecision,
     create_early_stop_method,

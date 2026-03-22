@@ -4,7 +4,7 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
-from shinka.core.async_runner import ShinkaEvolveRunner
+from shinka.runtime.runner import ShinkaEvolveRunner
 from shinka.database import Database, Program, program_reads, program_writes
 
 

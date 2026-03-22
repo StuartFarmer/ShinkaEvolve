@@ -6,11 +6,12 @@ from typing import TYPE_CHECKING, List, Optional
 
 import numpy as np
 
-from . import embedding_ops, program_reads
-from .connection import Database
+from . import reads as program_reads
+from shinka.database import embedding_ops
+from shinka.database.connection import Database
 
 if TYPE_CHECKING:
-    from .program import Program
+    from .model import Program
 
 logger = logging.getLogger(__name__)
 

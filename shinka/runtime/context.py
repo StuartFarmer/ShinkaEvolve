@@ -16,12 +16,13 @@ from typing import Callable, List, Optional
 
 import numpy as np
 
-from shinka.core.search_policies import ParentSelector, sort_programs_by_score
-from shinka.database import island_ops, program_reads
-from shinka.database.archive_policy import ArchivePolicy, create_archive_policy
+from shinka.database import island_ops
 from shinka.database.connection import Database
-from shinka.database.program import Program
 from shinka.database.types import Island
+from shinka.programs.archive import ArchivePolicy, create_archive_policy
+from shinka.programs.model import Program
+from shinka.programs import reads as program_reads
+from shinka.runtime.selection import ParentSelector, sort_programs_by_score
 
 
 @dataclass(frozen=True)

@@ -12,7 +12,7 @@ from .slurm import (
     submit_conda as submit_slurm_conda,
     monitor as monitor_slurm,
 )
-from shinka.utils import parse_time_to_seconds
+from shinka.launch.support import parse_time_to_seconds
 
 logger = logging.getLogger(__name__)
 

@@ -7,11 +7,12 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
-from .archive_policy import pick_random_archive_program
-from . import program_reads, program_writes
 from .models import ProgramEvaluationRecord, ProgramRecord
-from .program import Program
 from .types import Island
+from shinka.programs.archive import pick_random_archive_program
+from shinka.programs.model import Program
+from shinka.programs import reads as program_reads
+from shinka.programs import writes as program_writes
 
 logger = logging.getLogger(__name__)
 

@@ -4,7 +4,6 @@ import tempfile
 from pathlib import Path
 from shinka.database import Database, Program, island_ops, program_writes
 from shinka.database.island_sampler import create_island_sampler
-from shinka.database.archive_policy import create_archive_policy
 
 
 def test_island_samplers():
@@ -23,11 +22,6 @@ def test_island_samplers():
                 db_path=str(db_path),
                 num_islands=3,
                 read_only=False,
-            )
-            archive_policy = create_archive_policy(
-                archive_selection_strategy="fitness",
-                archive_size=40,
-                archive_criteria={"combined_score": 1.0},
             )
             island_sampler = create_island_sampler(
                 db,

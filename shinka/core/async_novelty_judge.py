@@ -9,7 +9,7 @@ from typing import List, Optional, Dict, Any, Tuple
 from .novelty_judge import NoveltyJudge
 from ..llm import AsyncLLMClient
 from ..database import Database, Program, island_ops
-from ..database.similarity_service import SimilarityService
+from ..programs.similarity import SimilarityService
 
 logger = logging.getLogger(__name__)
 

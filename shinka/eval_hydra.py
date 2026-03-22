@@ -9,7 +9,7 @@ from pathlib import Path
 
 import omegaconf
 import hydra
-from shinka.utils import load_hydra_config
+from shinka.configuration.hydra import load_hydra_config
 
 
 repo_root = Path(__file__).resolve().parents[1]

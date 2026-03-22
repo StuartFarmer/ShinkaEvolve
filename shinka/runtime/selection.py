@@ -13,9 +13,10 @@ from typing import List, Optional, Sequence
 
 import numpy as np
 
-from shinka.database import program_reads, run_state_ops
 from shinka.database.connection import Database
-from shinka.database.program import Program
+from shinka.database import run_state_ops
+from shinka.programs import reads as program_reads
+from shinka.programs.model import Program
 
 logger = logging.getLogger(__name__)
 

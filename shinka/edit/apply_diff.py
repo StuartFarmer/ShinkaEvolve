@@ -4,7 +4,7 @@ import difflib
 import logging
 from typing import Union, Optional, List, Tuple
 
-from shinka.utils.languages import get_language_extension
+from shinka.common.languages import get_language_extension
 
 logger = logging.getLogger(__name__)
 

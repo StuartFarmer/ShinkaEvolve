@@ -16,6 +16,52 @@ from shinka.database import (
 )
 from shinka.programs.archive import FitnessArchivePolicy
 
+def count_usage_by_role(session: Session, role: str) -> int:
+    query = select(func.count()).select_from(ProgramInspirationRecord).where(
+        ProgramInspirationRecord.role == role
+    )
+    return int(session.scalar(query) or 0)
+
+def list_sources_for_child(
+    session: Session,
+    child_program_id: str,
+    *,
+    role: Optional[str] = None,
+) -> List[str]:
+    inspirations = list_for_child(session, child_program_id)
+    if role is not None:
+        inspirations = [insp for insp in inspirations if insp.role == role]
+    return [insp.source_program_id for insp in inspirations]
+
+
+def list_children_for_source(
+    session: Session,
+    source_program_id: str,
+    *,
+    role: Optional[str] = None,
+) -> List[str]:
+    query = select(ProgramInspirationRecord.child_program_id).where(
+        ProgramInspirationRecord.source_program_id == source_program_id
+    )
+    if role is not None:
+        query = query.where(ProgramInspirationRecord.role == role)
+    rows = session.execute(query).all()
+    return [str(child_program_id) for (child_program_id,) in rows]
+
+
+def count_usage_by_source(
+    session: Session,
+    source_program_id: str,
+    *,
+    role: Optional[str] = None,
+) -> int:
+    query = select(func.count()).select_from(ProgramInspirationRecord).where(
+        ProgramInspirationRecord.source_program_id == source_program_id
+    )
+    if role is not None:
+        query = query.where(ProgramInspirationRecord.role == role)
+    return int(session.scalar(query) or 0)
+
 
 def make_program(
     *,
@@ -184,29 +230,29 @@ def test_program_repository_persists_inspirations_in_join_table(tmp_path):
         )
         assert summary["archive_inspiration_ids"] == [source_a.id]
         assert summary["top_k_inspiration_ids"] == [source_b.id]
-        assert inspiration_ops.list_sources_for_child(
+        assert list_sources_for_child(
             session,
             child.id,
             role="archive",
         ) == [source_a.id]
-        assert inspiration_ops.list_sources_for_child(
+        assert list_sources_for_child(
             session,
             child.id,
             role="top_k",
         ) == [source_b.id]
-        assert inspiration_ops.list_children_for_source(
+        assert list_children_for_source(
             session,
             source_a.id,
             role="archive",
         ) == [child.id]
-        assert inspiration_ops.list_children_for_source(
+        assert list_children_for_source(
             session,
             source_b.id,
             role="top_k",
         ) == [child.id]
-        assert inspiration_ops.count_usage_by_source(session, source_a.id) == 1
-        assert inspiration_ops.count_usage_by_role(session, "archive") == 1
-        assert inspiration_ops.count_usage_by_role(session, "top_k") == 1
+        assert count_usage_by_source(session, source_a.id) == 1
+        assert count_usage_by_role(session, "archive") == 1
+        assert count_usage_by_role(session, "top_k") == 1
 
     db.close()
 

@@ -7,6 +7,13 @@ from shinka.database import Database, Program, island_ops, program_reads, run_st
 from shinka.programs.archive import create_archive_policy
 from shinka.programs.service import ProgramWriteService
 
+def get_island_populations(session: Session, *, num_islands: int) -> Dict[int, int]:
+    if num_islands <= 0:
+        return {}
+    return {
+        island.island_idx: island.total_programs
+        for island in list_islands(session, num_islands=num_islands)
+    }
 
 class RuntimeHarness:
     def __init__(
@@ -112,7 +119,7 @@ class RuntimeHarness:
 
     def get_island_populations(self) -> dict[int, int]:
         with self.db.session() as session:
-            return island_ops.get_island_populations(
+            return get_island_populations(
                 session,
                 num_islands=self.num_islands,
             )

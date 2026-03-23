@@ -16,15 +16,6 @@ from shinka.programs import writes as program_writes
 
 logger = logging.getLogger(__name__)
 
-
-def get_program_island(session: Session, program_id: str) -> Optional[int]:
-    return session.scalar(select(ProgramRecord.island_idx).where(ProgramRecord.id == program_id))
-
-
-def get_program_count(session: Session) -> int:
-    return int(session.scalar(select(func.count()).select_from(ProgramRecord)) or 0)
-
-
 def get_max_island_index(session: Session) -> int:
     value = session.scalar(select(func.max(ProgramRecord.island_idx)))
     return int(value) if value is not None else -1
@@ -112,118 +103,6 @@ def are_all_islands_initialized(session: Session, *, num_islands: int) -> bool:
     if num_islands <= 0:
         return True
     return len(list_initialized_island_ids(session, num_islands=num_islands)) >= num_islands
-
-
-def get_island_populations(session: Session, *, num_islands: int) -> Dict[int, int]:
-    if num_islands <= 0:
-        return {}
-    return {
-        island.island_idx: island.total_programs
-        for island in list_islands(session, num_islands=num_islands)
-    }
-
-
-def format_populations(session: Session, *, num_islands: int) -> str:
-    populations = get_island_populations(session, num_islands=num_islands)
-    if not populations:
-        return f"0 programs in {num_islands} islands"
-    parts = []
-    for island_idx, count in sorted(populations.items()):
-        island_color = f"color({30 + island_idx % 220})"
-        parts.append(f"[{island_color}]I{island_idx}: {count}[/{island_color}]")
-    return " | ".join(parts)
-
-
-def assign_program(session: Session, program: Any, *, num_islands: int) -> None:
-    if program.island_idx is not None:
-        return
-    if num_islands <= 0:
-        program.island_idx = 0
-        return
-    if get_program_count(session) == 0:
-        program.island_idx = 0
-        if program.metadata is None:
-            program.metadata = {}
-        program.metadata["_needs_island_copies"] = True
-        return
-    if program.parent_id:
-        parent_island = get_program_island(session, program.parent_id)
-        if parent_island is not None:
-            program.island_idx = parent_island
-            return
-    initialized = set(list_initialized_island_ids(session, num_islands=num_islands))
-    uninitialized = [idx for idx in range(num_islands) if idx not in initialized]
-    if uninitialized:
-        program.island_idx = min(uninitialized)
-        return
-    program.island_idx = random.randint(0, num_islands - 1)
-
-
-def copy_program_to_islands(
-    session: Session,
-    program: Program,
-    *,
-    num_islands: int,
-) -> List[str]:
-    if num_islands <= 1:
-        return []
-    created_ids: List[str] = []
-    for island_idx in range(1, num_islands):
-        created_ids.append(
-            program_writes.insert_program_copy_from_object(
-                session,
-                program=program,
-                island_idx=island_idx,
-                metadata_updates={
-                    "_is_island_copy": True,
-                    "_original_program_id": program.id,
-                },
-                clear_copy_flag=True,
-            )
-        )
-    return created_ids
-
-
-def perform_migration(
-    session: Session,
-    *,
-    num_islands: int,
-    migration_rate: float,
-    island_elitism: bool,
-    current_generation: int,
-) -> bool:
-    if num_islands < 2 or migration_rate <= 0:
-        return False
-
-    migrated = 0
-    migrated_ids: set[str] = set()
-    for source_idx in range(num_islands):
-        island_size = program_reads.count_by_island(session, source_idx)
-        if island_size <= 1:
-            continue
-        num_migrants = max(1, int(island_size * migration_rate))
-        dest_islands = [idx for idx in range(num_islands) if idx != source_idx]
-        if not dest_islands:
-            continue
-        migrants = program_writes.list_migrant_ids(
-            session,
-            source_idx=source_idx,
-            num_migrants=num_migrants,
-            island_elitism=island_elitism,
-        )
-        for migrant_id in migrants:
-            if migrant_id in migrated_ids:
-                continue
-            migrated_ids.add(migrant_id)
-            program_writes.migrate_program(
-                session,
-                migrant_id=migrant_id,
-                source_idx=source_idx,
-                dest_idx=random.choice(dest_islands),
-                current_generation=current_generation,
-            )
-            migrated += 1
-    return migrated > 0
 
 
 def spawn_island(

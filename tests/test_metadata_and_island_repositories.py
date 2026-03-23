@@ -5,14 +5,58 @@ from shinka.database import (
     Database,
     Program,
     embedding_ops,
-    inspiration_ops,
     island_ops,
-    metadata_ops,
     program_reads,
     program_writes,
     run_state_ops,
 )
 
+def set(
+    session: Session,
+    key: str,
+    value: Optional[str],
+) -> None:
+    record = session.get(MetadataRecord, key)
+    if record is None:
+        session.add(MetadataRecord(key=key, value=value))
+    else:
+        record.value = value
+
+
+def get(session: Session, key: str, default: Optional[str] = None) -> Optional[str]:
+    record = session.get(MetadataRecord, key)
+    if record is None or record.value is None:
+        return default
+    return str(record.value)
+
+
+def count_usage_by_role(session: Session, role: str) -> int:
+    query = select(func.count()).select_from(ProgramInspirationRecord).where(
+        ProgramInspirationRecord.role == role
+    )
+    return int(session.scalar(query) or 0)
+
+def list_sources_for_child(
+    session: Session,
+    child_program_id: str,
+    *,
+    role: Optional[str] = None,
+) -> List[str]:
+    inspirations = list_for_child(session, child_program_id)
+    if role is not None:
+        inspirations = [insp for insp in inspirations if insp.role == role]
+    return [insp.source_program_id for insp in inspirations]
+
+def get_island_populations(session: Session, *, num_islands: int) -> Dict[int, int]:
+    if num_islands <= 0:
+        return {}
+    return {
+        island.island_idx: island.total_programs
+        for island in list_islands(session, num_islands=num_islands)
+    }
+
+def get_program_island(session: Session, program_id: str) -> Optional[int]:
+    return session.scalar(select(ProgramRecord.island_idx).where(ProgramRecord.id == program_id))
 
 def _program(program_id: str, *, generation: int = 0, island_idx: int = 0) -> Program:
     return Program(
@@ -35,9 +79,9 @@ def test_metadata_controller_loads_and_persists_generic_metadata():
         )
         try:
             with db.session_scope() as session:
-                metadata_ops.set(session, "custom_key", "custom_value")
+                set(session, "custom_key", "custom_value")
             with db.session() as session:
-                assert metadata_ops.get(session, "custom_key") == "custom_value"
+                assert get(session, "custom_key") == "custom_value"
         finally:
             db.close()
 
@@ -82,10 +126,10 @@ def test_island_controller_reports_island_state():
                 program_writes.add_program(session, _program("p0", generation=0, island_idx=0))
                 program_writes.add_program(session, _program("p1", generation=1, island_idx=2))
             with db.session() as session:
-                assert island_ops.get_program_island(session, "p1") == 2
+                assert get_program_island(session, "p1") == 2
                 initialized = island_ops.list_initialized_islands(session, num_islands=3)
                 islands = island_ops.list_islands(session, num_islands=3)
-                assert island_ops.get_island_populations(session, num_islands=3) == {
+                assert get_island_populations(session, num_islands=3) == {
                     0: 1,
                     1: 0,
                     2: 1,
@@ -124,7 +168,7 @@ def test_database_ops_cover_metadata_inspirations_and_embeddings():
             with db.session_scope() as session:
                 program_writes.add_program(session, parent)
                 program_writes.add_program(session, child)
-                metadata_ops.set(session, "custom_key", "custom_value")
+                set(session, "custom_key", "custom_value")
                 embedding_ops.update_features(
                     session,
                     program_id="child",
@@ -134,12 +178,12 @@ def test_database_ops_cover_metadata_inspirations_and_embeddings():
                 )
 
             with db.session() as session:
-                assert metadata_ops.get(session, "custom_key") == "custom_value"
-                assert inspiration_ops.list_sources_for_child(session, "child") == [
+                assert get(session, "custom_key") == "custom_value"
+                assert list_sources_for_child(session, "child") == [
                     "parent",
                     "parent",
                 ]
-                assert inspiration_ops.count_usage_by_role(session, "archive") == 1
+                assert count_usage_by_role(session, "archive") == 1
                 all_embeddings = embedding_ops.list_all(session)
                 assert isinstance(all_embeddings, list)
         finally:

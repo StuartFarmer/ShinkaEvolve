@@ -21,6 +21,96 @@ class ProgramWriteResult:
     spawned_island: bool = False
     ran_migration: bool = False
 
+def perform_migration(
+    session: Session,
+    *,
+    num_islands: int,
+    migration_rate: float,
+    island_elitism: bool,
+    current_generation: int,
+) -> bool:
+    if num_islands < 2 or migration_rate <= 0:
+        return False
+
+    migrated = 0
+    migrated_ids: set[str] = set()
+    for source_idx in range(num_islands):
+        island_size = program_reads.count_by_island(session, source_idx)
+        if island_size <= 1:
+            continue
+        num_migrants = max(1, int(island_size * migration_rate))
+        dest_islands = [idx for idx in range(num_islands) if idx != source_idx]
+        if not dest_islands:
+            continue
+        migrants = program_writes.list_migrant_ids(
+            session,
+            source_idx=source_idx,
+            num_migrants=num_migrants,
+            island_elitism=island_elitism,
+        )
+        for migrant_id in migrants:
+            if migrant_id in migrated_ids:
+                continue
+            migrated_ids.add(migrant_id)
+            program_writes.migrate_program(
+                session,
+                migrant_id=migrant_id,
+                source_idx=source_idx,
+                dest_idx=random.choice(dest_islands),
+                current_generation=current_generation,
+            )
+            migrated += 1
+    return migrated > 0
+
+
+def copy_program_to_islands(
+    session: Session,
+    program: Program,
+    *,
+    num_islands: int,
+) -> List[str]:
+    if num_islands <= 1:
+        return []
+    created_ids: List[str] = []
+    for island_idx in range(1, num_islands):
+        created_ids.append(
+            program_writes.insert_program_copy_from_object(
+                session,
+                program=program,
+                island_idx=island_idx,
+                metadata_updates={
+                    "_is_island_copy": True,
+                    "_original_program_id": program.id,
+                },
+                clear_copy_flag=True,
+            )
+        )
+    return created_ids
+
+
+def assign_program(session: Session, program: Any, *, num_islands: int) -> None:
+    if program.island_idx is not None:
+        return
+    if num_islands <= 0:
+        program.island_idx = 0
+        return
+    if get_program_count(session) == 0:
+        program.island_idx = 0
+        if program.metadata is None:
+            program.metadata = {}
+        program.metadata["_needs_island_copies"] = True
+        return
+    if program.parent_id:
+        parent_island = get_program_island(session, program.parent_id)
+        if parent_island is not None:
+            program.island_idx = parent_island
+            return
+    initialized = set(list_initialized_island_ids(session, num_islands=num_islands))
+    uninitialized = [idx for idx in range(num_islands) if idx not in initialized]
+    if uninitialized:
+        program.island_idx = min(uninitialized)
+        return
+    program.island_idx = random.randint(0, num_islands - 1)
 
 class ProgramWriteService:
     """
@@ -67,14 +157,14 @@ class ProgramWriteService:
         current_last_iteration: int = 0,
     ) -> ProgramWriteResult:
         with self.db.session_scope() as session:
-            island_ops.assign_program(session, program, num_islands=self.num_islands)
+            assign_program(session, program, num_islands=self.num_islands)
             program_id = program_writes.add_program(session, program, verbose=False)
             self.update_best_program(session, program)
 
             last_iteration = max(current_last_iteration, int(program.generation))
 
             if bool(program.metadata and program.metadata.get("_needs_island_copies")):
-                island_ops.copy_program_to_islands(
+                copy_program_to_islands(
                     session,
                     program,
                     num_islands=self.num_islands,
@@ -93,7 +183,7 @@ class ProgramWriteService:
                 and self.migration_interval > 0
                 and (program.generation % self.migration_interval == 0)
             ):
-                island_ops.perform_migration(
+                perform_migration(
                     session,
                     num_islands=self.num_islands,
                     migration_rate=self.migration_rate,

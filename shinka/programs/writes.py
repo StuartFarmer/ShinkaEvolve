@@ -19,7 +19,7 @@ from shinka.database.models import (
     ProgramEmbeddingRecord,
     ProgramEvaluationRecord,
     ProgramProposalRecord,
-    ProgramRecord,
+    ProgramRecord, ProgramInspirationRecord,
 )
 from shinka.database.types import InspirationUse
 
@@ -198,7 +198,7 @@ def add_program(session: Session, program: Program, *, verbose: bool = False) ->
             .where(ProgramRecord.id == program.parent_id)
             .values(children_count=ProgramRecord.children_count + 1)
         )
-    inspiration_ops.replace_for_child(
+    replace_for_child(
         session,
         program.id,
         _program_inspiration_uses(program),
@@ -353,3 +353,27 @@ def update_program_metadata(
     if record is None:
         return
     record.program_metadata = _clean_nan_values(metadata)
+
+
+def replace_for_child(
+    session: Session,
+    child_program_id: str,
+    inspirations: List[InspirationUse],
+) -> None:
+    session.execute(
+        delete(ProgramInspirationRecord).where(
+            ProgramInspirationRecord.child_program_id == child_program_id
+        )
+    )
+    for inspiration in inspirations:
+        session.add(
+            ProgramInspirationRecord(
+                id=str(uuid.uuid4()),
+                child_program_id=inspiration.child_program_id,
+                source_program_id=inspiration.source_program_id,
+                role=inspiration.role,
+                order_index=inspiration.order_index,
+                weight=inspiration.weight,
+                edge_metadata=dict(inspiration.metadata or {}),
+            )
+        )

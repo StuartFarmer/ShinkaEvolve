@@ -14,6 +14,15 @@ from .connection import Database
 
 logger = logging.getLogger(__name__)
 
+def format_populations(session: Session, *, num_islands: int) -> str:
+    populations = get_island_populations(session, num_islands=num_islands)
+    if not populations:
+        return f"0 programs in {num_islands} islands"
+    parts = []
+    for island_idx, count in sorted(populations.items()):
+        island_color = f"color({30 + island_idx % 220})"
+        parts.append(f"[{island_color}]I{island_idx}: {count}[/{island_color}]")
+    return " | ".join(parts)
 
 class DatabaseDisplay:
     """Rich console display backed by controllers/services, not raw SQL."""
@@ -68,7 +77,7 @@ class DatabaseDisplay:
 
     def _format_populations(self) -> str:
         with self.db.session() as session:
-            return island_ops.format_populations(
+            return format_populations(
                 session,
                 num_islands=self.num_islands,
             )
